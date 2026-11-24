@@ -1,0 +1,8 @@
+.pricing-grid { display: grid; grid-template-columns: 1fr; gap: 2rem; max-width: 900px; margin: 0 auto; }
+@media (min-width: 768px) { .pricing-grid { grid-template-columns: repeat(2, 1fr); } }
+.pricing-card { padding: 2.5rem 2rem; display: flex; flex-direction: column; position: relative; }
+.pricing-card.featured { border-color: rgba(94, 234, 212, 0.5); background: rgba(13, 19, 34, 0.85); box-shadow: 0 0 35px rgba(94, 234, 212, 0.15); }
+.pricing-tier-name { font-size: 1.5rem; font-weight: 700; margin-bottom: 0.5rem; }
+.pricing-feature-list { list-style: none; margin-bottom: 2rem; flex: 1; }
+.pricing-feature-item { display: flex; align-items: center; gap: 10px; font-size: 0.95rem; margin-bottom: 0.85rem; }
+.pricing-recommended-target { padding: 10px 14px; background: rgba(237, 242, 250, 0.04); border-radius: 8px; font-size: 0.85rem; color: var(--dim); }

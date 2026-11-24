@@ -1,0 +1,7 @@
+.faq-list { display: flex; flex-direction: column; gap: 1rem; max-width: 760px; margin: 0 auto; }
+.faq-item { background: rgba(13, 19, 34, 0.6); border: 1px solid var(--border-glass); border-radius: 14px; overflow: hidden; }
+.faq-summary { padding: 1.25rem 1.5rem; font-weight: 600; font-size: 1.05rem; cursor: pointer; list-style: none; display: flex; align-items: center; justify-content: space-between; min-height: 48px; }
+.faq-answer { padding: 0 1.5rem 1.5rem 1.5rem; color: var(--dim); font-size: 0.95rem; line-height: 1.7; }
+.app-footer { border-top: 1px solid var(--border-glass); padding: 3rem 1.25rem; text-align: center; background: rgba(7, 11, 20, 0.8); margin-top: 4rem; }
+.footer-brand { font-family: var(--font-display); font-weight: 700; font-size: 1.25rem; margin-bottom: 0.5rem; }
+.footer-copyright { font-size: 0.85rem; color: var(--dim-subtle); }

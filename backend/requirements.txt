@@ -1,0 +1,19 @@
+# GPU inference stack (RTX 5070 Ti / Blackwell, requires CUDA 12.8 build):
+# pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
+torch==2.11.0+cu128
+torchaudio==2.11.0+cu128
+
+fastapi==0.141.1
+uvicorn==0.52.1
+python-multipart==0.0.32
+filelock==3.29.0
+audio-separator[gpu]==0.44.5
+
+numpy==2.4.6
+scipy==1.17.1
+soundfile==0.14.0
+librosa==0.11.0
+pyloudnorm==0.2.0
+matchering==2.0.6
+huggingface_hub==1.26.0
+omegaconf==2.3.1

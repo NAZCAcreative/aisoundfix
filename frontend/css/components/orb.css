@@ -1,0 +1,12 @@
+.orb-container { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 2rem 1rem; }
+.aurora-orb-wrapper { position: relative; width: 180px; height: 180px; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin-bottom: 2rem; }
+.aurora-orb-aura { position: absolute; inset: -10px; border-radius: 50%; background: conic-gradient(from 0deg, var(--aurora-1), var(--aurora-2), var(--aurora-3), var(--aurora-1)); filter: blur(20px); opacity: 0.6; animation: rotateOrbAura 8s linear infinite; }
+.aurora-orb-core { position: relative; width: 100%; height: 100%; border-radius: 50%; background: var(--bg-soft); border: 2px solid rgba(94, 234, 212, 0.4); overflow: hidden; display: flex; align-items: center; justify-content: center; }
+.aurora-orb-fill { position: absolute; bottom: 0; left: 0; width: 100%; height: 0%; background: linear-gradient(180deg, var(--aurora-3) 0%, var(--aurora-2) 50%, var(--aurora-1) 100%); transition: height 0.6s ease; }
+.aurora-orb-text { position: relative; z-index: 5; font-family: var(--font-display); font-size: 2.5rem; font-weight: 700; color: #fff; }
+@keyframes rotateOrbAura { 100% { transform: rotate(360deg); } }
+
+.stage-checklist { width: 100%; max-width: 420px; display: flex; flex-direction: column; gap: 12px; }
+.stage-item { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; background: rgba(237, 242, 250, 0.03); border: 1px solid var(--border-glass); border-radius: 10px; font-size: 0.95rem; }
+.stage-item.active { background: rgba(94, 234, 212, 0.08); border-color: rgba(94, 234, 212, 0.4); color: var(--aurora-1); }
+.stage-item.completed { background: rgba(129, 140, 248, 0.08); border-color: rgba(129, 140, 248, 0.3); opacity: 0.8; }

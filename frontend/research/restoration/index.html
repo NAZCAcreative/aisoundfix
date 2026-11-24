@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>복원 블라인드 청음 · AISoundFix</title>
+<style>
+:root{color-scheme:dark;font-family:Inter,"Malgun Gothic",sans-serif;background:#121519;color:#edf1f3}
+*{box-sizing:border-box}body{margin:0}main{width:min(700px,100%);margin:8vh auto;padding:24px}
+a{color:#9edbbd}h1{font-size:clamp(2rem,7vw,3rem);letter-spacing:-.055em;margin:32px 0 12px}p{line-height:1.65;color:#bac2c9}
+section{border-top:1px solid #373e46;margin-top:24px;padding-top:22px}label,.label{display:block;margin-bottom:10px;font-weight:650}
+select,button,input{font:inherit}select,button{min-height:45px;border:1px solid #4c555d;background:#232a30;color:#f4f6f7;border-radius:7px;padding:8px 13px}
+select{max-width:100%}button{cursor:pointer}button:hover:enabled{border-color:#8dafa0}button[aria-pressed="true"],.primary{color:#101d18;background:#a9e5c8;border-color:#a9e5c8;font-weight:650}
+button:disabled,select:disabled{opacity:.55;cursor:wait}:focus-visible{outline:3px solid #a9e5c8;outline-offset:3px}
+.row{display:flex;align-items:center;flex-wrap:wrap;gap:9px}.transport{display:grid;grid-template-columns:auto minmax(80px,1fr) auto;align-items:center;gap:13px;margin:18px 0}
+input{width:100%;accent-color:#a9e5c8}output{font-variant-numeric:tabular-nums;color:#c8d1d6}#status{min-height:1.6em;margin:.6em 0 0;font-size:.92rem}#answer{line-height:1.65}ul{padding-inline-start:22px}
+</style>
+</head>
+<body>
+<main>
+<a href="/">← 스튜디오</a>
+<h1>복원 블라인드 청음</h1>
+<p>같은 8초를 반복해 들으며 기준 원본에 가장 가까운 소리를 골라보세요. 재생 중에 소리를 바꾸면 같은 박자에서 이어집니다.</p>
+<section>
+<label for="study">비교할 손상</label>
+<select id="study"><option value="peaks">피크가 잘린 녹음</option><option value="codec">48 kbps MP3 · 기존 프리셋과 AI 복원</option><option value="phase">48 kbps MP3 · 위상을 보존하는 복원</option></select>
+<p id="status" role="status"></p>
+</section>
+<section aria-label="플레이어">
+<div class="row" id="versions" role="group" aria-label="비교 음원"></div>
+<div class="transport"><button id="play" type="button" class="primary">재생</button>
+<input type="range" id="seek" min="0" max="8" step=".01" value="0" aria-label="재생 위치">
+<output id="time" for="seek">0.0 / 8.0초</output></div>
+</section>
+<section>
+<label for="choice">기준 원본과 가장 비슷하게 들린 소리</label>
+<div class="row"><select id="choice"></select><button type="button" id="reveal">결과 확인</button>
+<button type="button" id="again" hidden>다시 섞기</button></div>
+<div id="answer" aria-live="polite"></div>
+</section>
+</main>
+<script>
+"use strict";
+const samples = {
+  peaks: {input:"보정하지 않은 손상본", ffmpeg:"FFmpeg 기본 피크 복원", self_calibrated:"이 곡에서 강도를 맞춘 피크 복원"},
+  codec: {input:"보정하지 않은 MP3", current:"연구 당시의 기본 프리셋", apollo55:"Apollo만 55% 혼합", edge:"감지한 고역 경계 위주로 Apollo 혼합"},
+  phase: {input:"보정하지 않은 MP3", phase_model_high:"원래 위상에 AI 음량 추정과 소량의 고역 혼합", repeat:"재압축 오차로 대역별 보정", repeat_high:"재압축 오차 보정과 소량의 고역 혼합"}
+};
+const byId = id => document.getElementById(id);
+const cache = new Map();
+let ctx, version = 0, buffers = {}, order = [], selected = "reference";
+let sources = [], playing = false, ready = false, offset = 0, started = 0, duration = 8;
+const letter = i => String.fromCharCode(65+i);
+function shuffled(items) {
+  const copy = [...items];
+  for (let i = copy.length-1; i>0; i--) {
+    const j = Math.floor(Math.random()*(i+1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
+}
+function position() {
+  return playing ? (offset + Math.max(0, ctx.currentTime-started)) % duration : offset;
+}
+function stop() {
+  offset = position();
+  for (const node of sources) { node.source.stop(); node.source.disconnect(); node.gain.disconnect(); }
+  sources = []; playing = false; byId("play").textContent = "재생";
+}
+function switchTo(key) {
+  selected = key;
+  for (const button of byId("versions").children) button.setAttribute("aria-pressed",String(button.dataset.key===key));
+  for (const node of sources) node.gain.gain.setTargetAtTime(node.key===key ? 1 : 0,ctx.currentTime,.006);
+}
+async function play() {
+  if (!ready || playing) return;
+  const token = version;
+  await ctx.resume();
+  if (token!==version || playing || !ready) return;
+  started = ctx.currentTime + .025;
+  sources = Object.entries(buffers).map(([key,buffer]) => {
+    const source = ctx.createBufferSource(), gain = ctx.createGain();
+    source.buffer = buffer; source.loop = true; gain.gain.value = key===selected ? 1 : 0;
+    source.connect(gain); gain.connect(ctx.destination); source.start(started, offset % duration);
+    return {key, source, gain};
+  });
+  playing = true; byId("play").textContent = "일시정지";
+}
+function blindOrder() {
+  stop(); offset=0; selected="reference";
+  order = shuffled(Object.keys(samples[byId("study").value]));
+  const choices = byId("choice"); choices.replaceChildren(new Option("선택하세요",""));
+  const versions = byId("versions"); versions.replaceChildren();
+  for (const [idx,key] of ["reference", ...order].entries()) {
+    const label = idx===0 ? "기준 원본" : letter(idx-1);
+    const button = document.createElement("button"); button.type="button"; button.dataset.key=key;
+    button.textContent=label; button.disabled=!ready; button.setAttribute("aria-pressed",String(idx===0));
+    button.onclick=()=>{switchTo(key); play().catch(showError);}; versions.appendChild(button);
+    if (idx) choices.add(new Option(label,key));
+  }
+  choices.add(new Option("구분하기 어려움","unsure")); choices.disabled=!ready;
+  byId("answer").replaceChildren(); byId("again").hidden=true; byId("reveal").disabled=true;
+  byId("play").disabled=!ready; byId("seek").disabled=!ready;
+}
+function showError() { byId("status").textContent="음원을 불러오지 못했습니다. 페이지를 새로고침해 주세요."; }
+async function load() {
+  const token = ++version;
+  const type = byId("study").value;
+  ready=false; blindOrder(); byId("status").textContent="비교 음원을 불러오는 중…";
+  ctx ??= new AudioContext();
+  const pairs = await Promise.all(["reference",...Object.keys(samples[type])].map(async key=>{
+    const url=type+"-"+key+".flac";
+    if (!cache.has(url)) {
+      const loading=fetch(url).then(r=>{if(!r.ok) throw new Error(url); return r.arrayBuffer();})
+                              .then(bytes=>ctx.decodeAudioData(bytes)).catch(err=>{cache.delete(url);throw err;});
+      cache.set(url,loading);
+    }
+    return [key,await cache.get(url)];
+  }));
+  if(token!==version) return;
+  buffers=Object.fromEntries(pairs); duration=buffers.reference.duration; byId("seek").max=duration;
+  ready=true; blindOrder(); byId("status").textContent="모든 후보의 재생 음량을 맞췄습니다. 후보 순서는 무작위입니다.";
+}
+byId("study").onchange=()=>load().catch(showError);
+byId("play").onclick=()=>playing ? stop() : play().catch(showError);
+byId("seek").oninput=()=>{ const value=Number(byId("seek").value), resume=playing; stop(); offset=value%duration; if(resume) play().catch(showError); };
+byId("choice").onchange=()=>{byId("reveal").disabled=!byId("choice").value;};
+byId("reveal").onclick=()=>{
+  const choice=byId("choice"), labels=samples[byId("study").value], list=document.createElement("ul");
+  const summary=document.createElement("p");
+  summary.textContent=choice.value==="unsure" ? "이번에는 차이를 구분하기 어려웠습니다." : "고른 소리 · "+labels[choice.value];
+  order.forEach((key,i)=>{const li=document.createElement("li");li.textContent=letter(i)+" · "+labels[key];list.appendChild(li);});
+  byId("answer").replaceChildren(summary,list); choice.disabled=true; byId("reveal").disabled=true; byId("again").hidden=false;
+};
+byId("again").onclick=blindOrder;
+function tick() {
+  const pos=position(); if(document.activeElement!==byId("seek") || playing) byId("seek").value=pos;
+  byId("time").textContent=pos.toFixed(1)+" / "+duration.toFixed(1)+"초";
+  requestAnimationFrame(tick);
+}
+load().catch(showError); tick();
+</script>
+</body>
+</html>

@@ -1,0 +1,6 @@
+{
+  "preset_name": "natural",
+  "description": "원곡의 아날로그 질감을 살리는 자연스러운 마스터링",
+  "high_freq_boost_db": 1.5,
+  "target_lufs": -14.0
+}

@@ -1,0 +1,60 @@
+{
+  "version": "1.0.0",
+  "service_name": "REFINERY",
+  "upload_limits": {
+    "max_file_size_bytes": 104857600,
+    "max_file_size_mb": 100,
+    "allowed_extensions": [".mp3", ".wav", ".flac", ".m4a"],
+    "allowed_mime_types": [
+      "audio/mpeg",
+      "audio/wav",
+      "audio/x-wav",
+      "audio/flac",
+      "audio/mp4",
+      "audio/x-m4a"
+    ]
+  },
+  "tiers": {
+    "lite": {
+      "id": "lite",
+      "name": "라이트 (Lite)",
+      "description": "압축 복원 + 마스터링 기본 패키지",
+      "estimated_duration_sec": 60,
+      "stages": [
+        "디코딩",
+        "압축 아티팩트 복원",
+        "마스터링",
+        "인코딩"
+      ]
+    },
+    "standard": {
+      "id": "standard",
+      "name": "스탠다드 (Standard)",
+      "description": "스템 분리 & 보컬 개선까지 포함된 프리미엄 패키지",
+      "estimated_duration_sec": 240,
+      "stages": [
+        "디코딩",
+        "스템 분리·보컬 개선",
+        "압축 아티팩트 복원",
+        "마스터링",
+        "인코딩"
+      ]
+    }
+  },
+  "target_mastering": {
+    "target_lufs": -14.0,
+    "target_peak_db": -1.0
+  },
+  "status_codes": {
+    "QUEUED": "queued",
+    "PROCESSING": "processing",
+    "DONE": "done",
+    "ERROR": "error"
+  },
+  "error_codes": {
+    "FILE_TOO_LARGE": "ERR_FILE_TOO_LARGE",
+    "INVALID_FORMAT": "ERR_INVALID_FORMAT",
+    "PROCESSING_FAILED": "ERR_PROCESSING_FAILED",
+    "JOB_NOT_FOUND": "ERR_JOB_NOT_FOUND"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "preset_name": "clear",
+  "description": "보컬 명료도와 선명함을 극대화하는 맑은 마스터링",
+  "high_freq_boost_db": 3.2,
+  "vocal_presence_boost_db": 2.0,
+  "target_lufs": -14.0
+}

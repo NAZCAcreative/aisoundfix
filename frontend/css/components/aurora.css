@@ -1,0 +1,36 @@
+:root {
+  --bg: #070B14;
+  --bg-soft: #0D1322;
+  --bg-soft-hover: #141D33;
+  --aurora-1: #5EEAD4;
+  --aurora-2: #818CF8;
+  --aurora-3: #F0ABFC;
+  --text: #EDF2FA;
+  --dim: #8B97AD;
+  --dim-subtle: #56647E;
+  --border-glow: rgba(94, 234, 212, 0.25);
+  --border-glass: rgba(237, 242, 250, 0.08);
+  --font-sans: 'Pretendard', -apple-system, BlinkMacSystemFont, system-ui, Roboto, sans-serif;
+  --font-display: 'Space Grotesk', sans-serif;
+  --max-content-width: 1080px;
+  --header-height: 72px;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { font-family: var(--font-sans); background-color: var(--bg); color: var(--text); scroll-behavior: smooth; font-size: 16px; line-height: 1.6; }
+body { min-height: 100vh; overflow-x: hidden; position: relative; background: var(--bg); }
+:focus-visible { outline: 2px solid var(--aurora-1); outline-offset: 3px; border-radius: 4px; }
+
+.aurora-container { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: 0; overflow: hidden; }
+.aurora-blob { position: absolute; border-radius: 50%; filter: blur(80px); opacity: 0.45; mix-blend-mode: screen; will-change: transform; }
+.aurora-blob-1 { top: -15%; left: 10%; width: 55vw; height: 55vw; background: radial-gradient(circle, var(--aurora-1) 0%, rgba(94, 234, 212, 0) 70%); animation: floatAurora1 75s ease-in-out infinite alternate; }
+.aurora-blob-2 { top: 5%; right: -10%; width: 60vw; height: 60vw; background: radial-gradient(circle, var(--aurora-2) 0%, rgba(129, 140, 248, 0) 70%); animation: floatAurora2 85s ease-in-out infinite alternate; }
+.aurora-blob-3 { top: 40%; left: 30%; width: 45vw; height: 45vw; background: radial-gradient(circle, var(--aurora-3) 0%, rgba(240, 171, 252, 0) 70%); animation: floatAurora3 90s ease-in-out infinite alternate; opacity: 0.25; }
+.aurora-overlay { position: absolute; inset: 0; background: radial-gradient(circle at 50% 30%, transparent 20%, var(--bg) 90%); z-index: 1; }
+
+@keyframes floatAurora1 { 0% { transform: translate(0, 0) scale(1); } 50% { transform: translate(12%, 18%) scale(1.15); } 100% { transform: translate(-10%, 8%) scale(0.9); } }
+@keyframes floatAurora2 { 0% { transform: translate(0, 0) scale(1); } 50% { transform: translate(-15%, 15%) scale(1.1); } 100% { transform: translate(8%, -12%) scale(1.2); } }
+@keyframes floatAurora3 { 0% { transform: translate(0, 0) scale(1); } 50% { transform: translate(15%, -20%) scale(1.2); } 100% { transform: translate(-12%, 15%) scale(0.95); } }
+
+@media (prefers-reduced-motion: reduce) { .aurora-blob { animation: none !important; } }
+@media (max-width: 767px) { .aurora-blob { filter: blur(40px); opacity: 0.35; } .aurora-blob-1 { width: 80vw; height: 80vw; } .aurora-blob-2 { width: 85vw; height: 85vw; } .aurora-blob-3 { width: 70vw; height: 70vw; } }
