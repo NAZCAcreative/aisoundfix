@@ -16,6 +16,35 @@ from worker.pipeline.stages.band_repair import repair_band, spectral_edge
 
 
 class StudioRepairTests(unittest.TestCase):
+    def test_quantizer_preserves_the_master_true_peak_ceiling(self):
+        rate = 48000
+        raw = np.sin(2 * np.pi * 50 * np.arange(rate) / rate)
+        with TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            sf.write(folder / "source.wav", raw, rate, subtype="FLOAT")
+            wet, _, stats = studio.render_audio(folder, 0, 0, 0, 0, bits=8, dither=True)
+        self.assertLessEqual(studio.peak_db(wet), -1)
+        self.assertLessEqual(stats["truePeak"], -1)
+        np.testing.assert_array_equal(wet * 128, np.rint(wet * 128))
+
+    def test_fullness_lifts_bass_and_spatial_width_keeps_the_centre(self):
+        rate = 24000
+        time = np.arange(rate) / rate
+        centre = .13 * np.sin(2 * np.pi * 50 * time)
+        side = .07 * np.sin(2 * np.pi * 3000 * time)
+        source = np.column_stack((centre + side, centre - side))
+        with TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            sf.write(folder / "source.wav", source, rate, subtype="FLOAT")
+            fullness, _, _ = studio.render_audio(folder, 0, 0, 0, 0, fullness=100)
+            both, _, _ = studio.render_audio(folder, 0, 0, 100, 0, fullness=100)
+        # Skip the initial filter state transient for steady-state measurements.
+        frames = slice(rate // 2, None)
+        assert 1.56 < np.std(fullness.mean(axis=1)[frames]) / np.std(centre[frames]) < 1.59
+        np.testing.assert_allclose(both.mean(axis=1), fullness.mean(axis=1), atol=4e-8)
+        ratio = np.std((both[:, 0] - both[:, 1])[frames]) / (2 * np.std(side[frames]))
+        assert 1.79 < ratio < 1.81
+
     def test_peak_recipe_is_local_and_survives_block_boundaries(self):
         rate = 32000
         t = np.arange(rate * 2) / rate

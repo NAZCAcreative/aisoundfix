@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>양자화 전후 듣기 · AISoundFix</title>
+<style>
+:root{color-scheme:dark;font-family:Inter,"Malgun Gothic",sans-serif;background:#121519;color:#edf1f3}
+*{box-sizing:border-box}body{margin:0}main{width:min(680px,100%);margin:6vh auto;padding:24px}
+a{color:#9edbbd}h1{font-size:clamp(2rem,7vw,3rem);letter-spacing:-.055em;margin:32px 0 10px}
+p{line-height:1.65;color:#bac2c9}section{border-top:1px solid #373e46;margin-top:22px;padding-top:20px}
+label{display:block;margin-bottom:8px;font-weight:650}.row{display:flex;align-items:end;flex-wrap:wrap;gap:10px}
+select,button,input{font:inherit}button,select{min-height:44px;border:1px solid #4c555d;border-radius:7px;padding:8px 13px;background:#232a30;color:#f4f6f7}
+.row>div,select{max-width:100%}
+button{cursor:pointer}button[aria-pressed=true]{background:#a9e5c8;border-color:#a9e5c8;color:#101d18;font-weight:650}
+button:disabled,select:disabled{opacity:.5;cursor:default}:focus-visible{outline:3px solid #a9e5c8;outline-offset:3px}
+.transport{display:grid;grid-template-columns:auto minmax(65px,1fr) auto;align-items:center;gap:12px;margin-top:16px}
+input{width:100%;accent-color:#a9e5c8}output{font-variant-numeric:tabular-nums}#result{white-space:pre-line;color:#edf1f3}
+#local-controls{margin-top:16px}#song-open{background:#a9e5c8;border-color:#a9e5c8;color:#101d18;font-weight:650}
+#song-info{overflow-wrap:anywhere}#excerpt-slider{width:min(250px,100%)}
+#excerpt-start{width:85px;min-height:40px;border:1px solid #4c555d;border-radius:7px;padding:4px 8px;background:#232a30;color:#f4f6f7}
+</style>
+</head>
+<body>
+<main>
+<a href="/">← 스튜디오</a>
+<h1>양자화 전후 듣기</h1>
+<p>양자화는 소리의 크기를 정해진 단계로 반올림합니다. 기준 원본과 양자화 버튼을 번갈아 누르면 같은 박자에서 차이를 들을 수 있습니다.</p>
+<section aria-label="실험 조건">
+  <div class="row">
+    <div><label for="clip">음원</label><select id="clip"><option value="samples" selected>샘플 곡</option><option value="local">내 곡</option><option value="music">실험용 합성 연주</option><option value="fade">실험용 합성 연주 · 페이드</option></select></div>
+    <div><label for="depth">후보 비트 깊이</label><select id="depth"><option>8</option><option>12</option><option>16</option><option>24</option></select></div>
+    <button id="blind" type="button" aria-pressed="false">블라인드 청음</button>
+  </div>
+  <div id="local-controls" hidden>
+    <button id="song-open" type="button">내 곡 파일 선택</button>
+    <input id="song-file" type="file" accept="audio/*,.wav,.mp3,.flac,.m4a,.aac,.ogg,.opus,.aif,.aiff" hidden>
+    <p id="song-info">WAV·MP3·FLAC 등 브라우저가 재생할 수 있는 파일을 이 기기에서 처리합니다. MP3도 디코딩한 PCM 파형을 기준으로 비교합니다.</p>
+    <div id="excerpt" hidden>
+      <label for="excerpt-start">비교할 구간 시작 (초)</label>
+      <div class="row">
+        <input id="excerpt-start" type="number" min="0" step="any" value="0">
+        <input id="excerpt-slider" type="range" min="0" step=".1" value="0" aria-label="곡에서 비교 구간 찾기">
+        <output id="excerpt-label" for="excerpt-start excerpt-slider"></output>
+      </div>
+    </div>
+  </div>
+  <p id="hint" hidden>2초부터 음량이 줄어듭니다. 끝부분에서 잔향과 잡음을 비교해 보세요.</p>
+</section>
+<section aria-label="비교 재생">
+  <div class="row" role="group" aria-label="청음할 버전">
+    <button data-slot="0" aria-pressed="true" disabled>기준 원본</button>
+    <button data-slot="1" aria-pressed="false" disabled>8비트 양자화</button>
+    <button data-slot="2" aria-pressed="false" disabled>8비트 양자화 + 디더</button>
+  </div>
+  <div class="transport">
+    <button id="play" disabled>재생</button>
+    <input id="seek" type="range" min="0" max="8" step=".01" value="0" aria-label="재생 위치" disabled>
+    <output id="time" for="seek">0.0 / 8.0초</output>
+  </div>
+  <p id="status" role="status"></p>
+  <button id="retry" hidden>다시 불러오기</button>
+</section>
+<section id="ballot" aria-label="청음 응답" hidden>
+  <label for="choice">기준 원본과 가장 비슷하게 들린 후보</label>
+  <div class="row">
+    <select id="choice" disabled><option value="">선택하세요</option><option>A</option><option>B</option><option>구분하기 어려움</option></select>
+    <button id="reveal" disabled>결과 확인</button>
+    <button id="shuffle" hidden>다시 섞기</button>
+  </div>
+  <p id="result" aria-live="polite"></p>
+</section>
+</main>
+<script type="module">
+import {decodeSong, prepareExcerpt} from "./local-song.js";
+
+const id = key => document.getElementById(key);
+const buttons = [...document.querySelectorAll("[data-slot]")];
+const labels = {round: "가장 가까운 값으로 반올림", tpdf: "삼각분포 디더(TPDF) 후 반올림"};
+let context, buffers, order, selected = 0, nodes = [];
+let offset = 0, startTime = 0, duration = 8, generation = 0, transport = 0;
+let song, songRevision = 0, songMessage = "", excerptStart = 0;
+let decodeFinished = Promise.resolve();
+let sampleRequest, uploadedFile, retrySource = false;
+
+function isStudyClip(clip) {
+  return clip === "music" || clip === "fade";
+}
+
+function timeLabel(value) {
+  const tenths = Math.round(value * 10);
+  return Math.floor(tenths / 600) + ":" + ((tenths % 600) / 10).toFixed(1).padStart(4, "0");
+}
+
+async function selectSource() {
+  const clip = id("clip");
+  let key = clip.value;
+  const revision = ++songRevision;
+  sampleRequest?.abort();
+  const controller = new AbortController();
+  sampleRequest = controller;
+  song = null;
+  excerptStart = 0;
+  retrySource = false;
+  songMessage = key === "local" ? (uploadedFile ? "곡을 디코딩하는 중…" : "내 곡 파일을 선택하세요.")
+      : "샘플 곡을 불러오는 중…";
+  id("song-info").textContent = key === "local" && !uploadedFile
+      ? "WAV·MP3·FLAC 등 브라우저가 재생할 수 있는 파일을 이 기기에서 처리합니다." : "";
+  load();
+  if (isStudyClip(key) || (key === "local" && !uploadedFile)) return;
+  try {
+    if (key === "samples") {
+      const response = await fetch("/api/studio/sample-songs", {signal: controller.signal, cache: "no-store"});
+      if (!response.ok) throw new Error("sample catalog");
+      const {songs} = await response.json();
+      if (revision !== songRevision) return;
+      if (!songs.length) {
+        songMessage = "data/sound 폴더에 샘플 음원이 없습니다. 파일을 직접 선택할 수 있습니다.";
+        retrySource = true;
+        load();
+        return;
+      }
+      const options = songs.map(({name, url}) => new Option(name, url));
+      clip.querySelector('[value="samples"]').replaceWith(...options);
+      key = clip.value = options[0].value;
+    }
+    const name = key === "local" ? uploadedFile.name : clip.selectedOptions[0].textContent;
+    id("song-info").textContent = name;
+    let file = uploadedFile;
+    if (key !== "local") {
+      const response = await fetch(key, {signal: controller.signal});
+      if (!response.ok) throw new Error("sample file");
+      file = await response.blob();
+      if (revision !== songRevision) return;
+    }
+    context ??= new AudioContext();
+    // Browser decoders cannot be cancelled. Keep at most one full-song decode
+    // in memory and skip queued files that the listener has already replaced.
+    const pending = decodeFinished.then(() => {
+      if (revision === songRevision) return decodeSong(file, context);
+    });
+    decodeFinished = pending.catch(() => {}).then(() => {});
+    const decoded = await pending;
+    if (revision !== songRevision) return;
+    song = decoded;
+    id("song-info").textContent = name + " · " + timeLabel(song.duration) + " · 비교 PCM "
+        + song.sampleRate.toLocaleString("ko-KR") + " Hz · " + song.numberOfChannels + "채널";
+    // Leave a useful final excerpt even when the slider is at its right limit.
+    const max = Math.max(0, song.duration - Math.min(1, song.duration));
+    for (const control of [id("excerpt-start"), id("excerpt-slider")]) {
+      control.max = String(max);
+      control.value = "0";
+      control.disabled = !max;
+    }
+    songMessage = "";
+  } catch {
+    if (revision !== songRevision) return;
+    songMessage = key === "local" ? "이 곡을 읽을 수 없습니다. WAV 또는 MP3 등 다른 파일을 선택하세요."
+        : "샘플 곡을 불러오지 못했습니다. 다시 시도하거나 파일을 선택하세요.";
+    retrySource = key !== "local";
+  }
+  load();
+}
+
+function setExcerpt(control) {
+  if (!song) return;
+  const value = control.valueAsNumber;
+  if (!Number.isFinite(value)) { control.value = String(excerptStart); return; }
+  excerptStart = Math.max(0, Math.min(Number(id("excerpt-start").max), value));
+  id("excerpt-start").value = id("excerpt-slider").value = String(excerptStart);
+  load();
+}
+
+function position() {
+  return nodes.length ? (offset + Math.max(0, context.currentTime - startTime)) % duration : offset;
+}
+function stop() {
+  transport++;
+  offset = position();
+  for (const {source, gain} of nodes) {
+    source.stop();
+    source.disconnect();
+    gain.disconnect();
+  }
+  nodes = [];
+  id("play").textContent = "재생";
+}
+async function play() {
+  if (!buffers || nodes.length) return;
+  const token = ++transport;
+  try {
+    await context.resume();
+    if (token !== transport) return;
+    startTime = context.currentTime + .025;
+    nodes = order.map((key, slot) => {
+      const source = context.createBufferSource(), gain = context.createGain();
+      source.buffer = buffers[key];
+      source.loop = true;
+      gain.gain.value = slot === selected ? 1 : 0;
+      source.connect(gain).connect(context.destination);
+      source.start(startTime, offset);
+      return {source, gain};
+    });
+    id("play").textContent = "일시정지";
+  } catch {
+    if (token === transport) id("status").textContent = "재생을 시작할 수 없습니다. 재생 버튼으로 다시 시도하세요.";
+  }
+}
+function select(slot) {
+  selected = slot;
+  buttons.forEach((btn, i) => btn.setAttribute("aria-pressed", String(i === slot)));
+  nodes.forEach(({gain}, i) => gain.gain.setTargetAtTime(i === slot ? 1 : 0, context.currentTime, .003));
+}
+function resetTrial() {
+  stop();
+  offset = 0;
+  const blind = id("blind").getAttribute("aria-pressed") === "true";
+  order = blind && Math.random() < .5 ? ["reference", "tpdf", "round"] : ["reference", "round", "tpdf"];
+  const depth = id("depth").value + "비트 양자화";
+  buttons[1].textContent = blind ? "A" : depth;
+  buttons[2].textContent = blind ? "B" : depth + " + 디더";
+  id("ballot").hidden = !blind;
+  select(0);
+  id("choice").value = "";
+  id("choice").disabled = !buffers;
+  id("result").textContent = "";
+  id("shuffle").hidden = true;
+  id("reveal").disabled = true;
+  for (const control of [...buttons, id("play"), id("seek")]) control.disabled = !buffers;
+}
+async function load() {
+  const token = ++generation, clip = id("clip").value, depth = id("depth").value;
+  buffers = null;
+  resetTrial();
+  const fullSong = !isStudyClip(clip);
+  id("local-controls").hidden = !fullSong;
+  id("excerpt").hidden = !fullSong || !song;
+  id("hint").hidden = clip !== "fade";
+  id("retry").hidden = true;
+  if (fullSong && !song) {
+    id("status").textContent = songMessage || "내 곡 파일을 선택하세요.";
+    id("retry").hidden = !retrySource;
+    id("time").textContent = "—";
+    return;
+  }
+  id("status").textContent = "비교 음원을 불러오는 중…";
+  try {
+    context ??= new AudioContext();
+    let gainNote = "";
+    if (fullSong) {
+      const excerpt = prepareExcerpt(song, excerptStart, Number(depth), context);
+      buffers = excerpt.buffers;
+      id("excerpt-label").textContent = timeLabel(excerpt.start) + " – " + timeLabel(excerpt.end);
+      if (excerpt.gain < 1) gainNote = " 피크 여유를 위해 세 음원에 "
+          + (20*Math.log10(excerpt.gain)).toFixed(1) + " dB를 공통 적용했습니다.";
+    } else {
+      const entries = await Promise.all(["reference","round","tpdf"].map(async key => {
+        const file = clip + "-" + (key === "reference" ? key : depth + "-" + key) + ".flac";
+        const response = await fetch(file);
+        if (!response.ok) throw new Error(file);
+        return [key, await context.decodeAudioData(await response.arrayBuffer())];
+      }));
+      if (token !== generation) return;
+      buffers = Object.fromEntries(entries);
+    }
+    duration = buffers.reference.duration;
+    id("seek").max = duration;
+    resetTrial();
+    id("status").textContent = "세 음원을 같은 재생 게인으로 반복합니다." + gainNote;
+  } catch {
+    if (token !== generation) return;
+    id("status").textContent = "비교 음원을 불러오지 못했습니다.";
+    id("retry").hidden = false;
+  }
+}
+buttons.forEach((btn,i) => btn.onclick = () => {select(i); play();});
+id("blind").onclick = () => {
+  id("blind").setAttribute("aria-pressed", String(id("blind").getAttribute("aria-pressed") !== "true"));
+  resetTrial();
+};
+id("play").onclick = () => nodes.length ? stop() : play();
+id("seek").oninput = () => {
+  const resume = nodes.length > 0;
+  stop();
+  offset = Number(id("seek").value) % duration;
+  if (resume) play();
+};
+id("clip").onchange = selectSource;
+id("depth").onchange = load;
+id("retry").onclick = () => retrySource ? selectSource() : load();
+id("song-open").onclick = () => id("song-file").click();
+id("song-file").onchange = event => {
+  const file = event.target.files[0];
+  event.target.value = "";
+  if (file) {
+    uploadedFile = file;
+    id("clip").value = "local";
+    selectSource();
+  }
+};
+id("excerpt-slider").oninput = event => {id("excerpt-start").value = event.target.value;};
+id("excerpt-slider").onchange = event => setExcerpt(event.target);
+id("excerpt-start").onchange = event => setExcerpt(event.target);
+id("choice").onchange = () => id("reveal").disabled = !id("choice").value;
+id("reveal").onclick = () => {
+  id("result").textContent = "내 선택 · " + id("choice").value + "\nA · " + labels[order[1]] + "\nB · " + labels[order[2]];
+  id("reveal").disabled = id("choice").disabled = true;
+  id("shuffle").hidden = false;
+};
+id("shuffle").onclick = resetTrial;
+function tick() {
+  const t = position();
+  id("seek").value = t;
+  id("time").textContent = buffers ? t.toFixed(1) + " / " + duration.toFixed(1) + "초" : "—";
+  requestAnimationFrame(tick);
+}
+const params = new URLSearchParams(location.search);
+if (params.get("blind") === "1") id("blind").setAttribute("aria-pressed", "true");
+for (const key of ["clip", "depth"]) {
+  const select = id(key), value = params.get(key);
+  if ([...select.options].some(option => option.value === value)) select.value = value;
+}
+selectSource();
+tick();
+</script>
+</body>
+</html>

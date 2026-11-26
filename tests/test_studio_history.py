@@ -79,6 +79,82 @@ class HistoryTests(unittest.TestCase):
         self.assertFalse(folder.exists())
         self.assertEqual(self.client.get(self.base + "/tracks/" + key + "/audio").status_code, 404)
 
+    def test_library_example_prefers_local_music_and_reuses_cached_track(self):
+        music = self.root / "테스트 곡.wav"
+        music.write_bytes(self.wav)
+        url = self.base + "/examples/library"
+        with patch.object(studio, "sample_songs", return_value=[music]):
+            first = self.client.get(url).raise_for_status().json()
+            self.assertEqual((first["name"], first["example"]), ("테스트 곡", "library"))
+            self.assertEqual(self.client.get(url).json()["id"], first["id"])
+        with patch.object(studio, "sample_songs", return_value=[]):
+            self.assertEqual(self.client.get(url).raise_for_status().json()["id"],
+                             self.client.get(self.base + "/examples/clipped").json()["id"])
+
+    def test_quantized_saved_render_and_legacy_recipe_identity(self):
+        key = self.upload()
+        url = self.base + "/tracks/" + key + "/render"
+        legacy = {"clarity": 5}
+        original = self.client.post(url, json=legacy).raise_for_status().content
+        neutral = {**legacy, "fullness": 0, "bits": 0, "dither": True}
+        self.assertEqual(self.client.post(url, json=neutral).raise_for_status().content, original)
+        row, = self.library.list("local")
+        version, = row["versions"]
+        self.assertFalse({"bits", "dither", "fullness"}.intersection(version["recipe"]))
+
+        settings = {"fullness": 71, "bits": 8, "dither": True}
+        preview = self.client.post(url + "?preview=true", json=settings).raise_for_status()
+        saved = self.client.post(url, json=settings).raise_for_status()
+        self.assertEqual(preview.content, saved.content)
+        codes, _ = sf.read(io.BytesIO(saved.content), dtype="int32")
+        self.assertTrue(np.all((codes & 0x00ffffff) == 0))
+        self.assertGreater(np.max(np.abs(codes)), 1 << 25)
+        row, = self.library.list("local")
+        version = next(v for v in row["versions"] if v["recipe"].get("bits"))
+        self.assertTrue(all(version["recipe"][k] == v for k, v in settings.items()))
+        self.assertEqual(self.client.post(url, json={"bits": 10}).status_code, 422)
+
+    def test_stem_pair_region_preview_and_vocal_export(self):
+        backing_file = io.BytesIO()
+        t = np.arange(30000) / 24000
+        backing = np.stack((.12*np.sin(2*np.pi*239*t), .08*np.cos(2*np.pi*733*t)), axis=1)
+        sf.write(backing_file, backing, 24000, format="WAV", subtype="FLOAT")
+        pair = self.client.post(self.base + "/tracks/stem-pair", files={
+            "vocals": ("v.wav", self.wav, "audio/wav"),
+            "instrumental": ("i.wav", backing_file.getvalue(), "audio/wav"),
+        })
+        pair.raise_for_status()
+        info = pair.json()
+        self.assertEqual((info["stemPair"], info["channels"], info["vocalChannels"], info["duration"]),
+                         (True, 2, 1, 1.25))
+        url = self.base + "/tracks/" + info["id"]
+        original, rate = sf.read(io.BytesIO(self.client.get(url + "/audio").content), always_2d=True)
+        settings = {"clarity": 80, "region": {"start": .25, "end": .75}}
+        preview = self.client.post(url + "/render?preview=true", json=settings)
+        preview.raise_for_status()
+        levels = json.loads(preview.headers["X-Audio-Metrics"])["regionLevels"]
+        self.assertEqual((levels["start"], levels["end"]), (.25, .75))
+        self.assertTrue(np.isfinite([levels["originalLufs"], levels["processedLufs"]]).all())
+        voice = self.client.post(url + "/render", json={**settings, "output": "vocals"})
+        voice.raise_for_status()
+        row, = self.library.list("local")
+        self.assertEqual(row["versions"], [])
+        self.assertEqual(self.client.post(url + "/render", json=settings).content, preview.content)
+        mixed, _ = sf.read(io.BytesIO(preview.content), always_2d=True)
+        vocal, _ = sf.read(io.BytesIO(voice.content), always_2d=True)
+        np.testing.assert_allclose(mixed, (backing + vocal)*info["mixGain"], rtol=0, atol=3e-7)
+        outside = (t < .25) | (t >= .75)
+        np.testing.assert_allclose(mixed[outside], original[outside], rtol=0, atol=1.3e-7)
+        self.assertGreater(np.max(np.abs(mixed[~outside]-original[~outside])), .001)
+        row, = self.library.list("local")
+        self.assertEqual(row["versions"][0]["recipe"]["region"], settings["region"])
+        self.assertTrue(self.client.post(self.history + "/" + info["id"] + "/open").json()["stemPair"])
+        for region in ({"start": .5, "end": .5}, {"start": .9, "end": 2}):
+            self.assertEqual(self.client.post(url + "/render", json={"region": region}).status_code, 422)
+        key = self.upload()
+        self.assertEqual(self.client.post(self.base + "/tracks/" + key + "/render",
+                                          json={"output": "vocals"}).status_code, 422)
+
     def test_legacy_files_and_busy_snapshot(self):
         old = self.old / "aisoundfix-studio-abc12345"
         key = uuid.uuid4().hex

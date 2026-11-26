@@ -47,6 +47,8 @@ main {max-width:1530px; padding:clamp(24px,2.3vw,39px) clamp(24px,3.1vw,58px) 42
 .page-heading,.section-heading,.heading-line,.rack-actions,.output-name,.button,.deck-top,.match,.transport,.transport-left,.compare,.volume,.track-meta,.monitor-label,.filter-title,.filter-control,.dialog-heading,.stem-save {display:flex; align-items:center}
 .page-heading,.section-heading,.deck-top,.dialog-heading {justify-content:space-between}
 .page-heading {gap:14px; margin-bottom:24px}
+.heading-actions {display:flex; align-items:center; flex-wrap:wrap; gap:8px}
+@media(max-width:850px){.page-heading {flex-wrap:wrap}}
 h1 {font-size:clamp(1.85rem,2.4vw,2.75rem); line-height:1.18; letter-spacing:-.065em; font-weight:760}
 .page-heading p {margin-top:8px; color:var(--muted); font-size:1rem; letter-spacing:-.035em}
 .button {justify-content:center; gap:8px; min-height:42px; padding:0 17px; border-radius:8px; font-size:.91rem; font-weight:680; letter-spacing:-.025em; white-space:nowrap; transition:background .15s,transform .15s,box-shadow .15s}
@@ -116,6 +118,12 @@ button:disabled,.button:disabled {opacity:.47}
 #waveform {width:100%; height:100%; display:block}
 #seek {position:absolute; inset:0; width:100%; height:100%; margin:0; opacity:0; cursor:crosshair}
 .wave-track:focus-within {outline:2px solid #fda27b; outline-offset:2px}
+.wave-track #seek {touch-action:none}
+.region-controls {display:flex; flex-wrap:wrap; align-items:center; gap:6px 10px; margin:8px 0 4px; font-size:.79rem; color:#dadfdf}
+.region-controls input,.region-controls button {font:inherit; border:1px solid #697177; border-radius:4px; background:#262b2e; color:#f0f3f2; padding:4px 7px}
+.region-controls input {width:6em; font-variant-numeric:tabular-nums}
+.symptoms,.trial-actions {display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-top:12px}
+.trial-actions[hidden] {display:none}
 .ruler {display:flex; justify-content:space-between; color:#bfc3c7; font: .72rem/1.3 var(--mono); margin-top:5px; padding:0 1px}
 .transport {position:relative; min-height:58px; gap:18px; padding:10px 24px; border-top:1px solid #393b3d; background:#222427; justify-content:space-between}
 .transport-left {gap:11px}
@@ -132,6 +140,27 @@ kbd {font: .71rem/1 var(--mono); font-weight:650}
 .compare kbd {display:grid; place-items:center; min-width:16px; height:16px; border:1px solid #696b6e; border-radius:3px; color:#c7cbce}
 .compare [aria-pressed=true] kbd {color:#ffc4a6; border-color:#937665}
 .compare-note {padding:0 24px 11px; background:#222427; color:#e6cec1; text-align:center; font-size:.79rem; line-height:1.5; overflow-wrap:anywhere}
+#tone-panel {background:#fff; border:1px solid var(--line); border-radius:12px; margin-top:12px; padding:15px 18px}
+.tone-heading,.tone-setting,.tone-toggle {display:flex; align-items:center; gap:8px}
+.tone-heading {flex-wrap:wrap; margin-bottom:12px}
+.tone-heading h2 {font-size:1.08rem}
+.tone-heading span,#tone-status {font-size:.8rem; color:var(--muted)}
+.tone-grid {display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px}
+.tone-card {padding:9px 12px; border:1px solid var(--line); border-radius:8px; background:var(--paper)}
+.tone-toggle {font-weight:700; min-height:34px; padding:2px 8px; margin-left:-6px; border-radius:5px}
+.tone-toggle i {color:#6a7374}
+.tone-toggle[aria-pressed=true] {background:#ffdfcc; color:#743315}
+.tone-toggle[aria-pressed=true] i {color:inherit}
+.tone-setting {height:32px; margin-top:4px; justify-content:space-between; font-size:.8rem}
+.tone-setting select {font:inherit; padding:3px; max-width:100%}
+.tone-setting label {white-space:nowrap}
+.tone-setting input[type=range] {min-width:0; width:100%; --knob:#ed7c47; --range-track:#cbd0ce}
+.tone-setting output {font-variant-numeric:tabular-nums; min-width:4ch; text-align:right}
+@media(max-width:600px) {
+  .tone-grid {grid-template-columns:1fr; gap:6px}
+  .tone-card {display:grid; grid-template-columns:minmax(82px,1fr) 1.5fr; align-items:center; padding:3px 10px}
+  .tone-setting {margin:0}
+}
 @media(max-width:760px){.compare-note{padding-inline:12px}}
 .volume {gap:7px}
 input[type=range]:not(#seek) {appearance:none; -webkit-appearance:none; height:18px; cursor:pointer; background:transparent; margin:0; border:0}
@@ -205,6 +234,13 @@ input[type=range]:not(#seek)::-moz-range-thumb {width:12px; height:12px; border-
 .stem-card h3 {font-size:1.1rem; margin:8px 0 13px}
 .stem-card audio {width:100%; display:block; margin-bottom:10px}
 .stem-save {font-size:.84rem; gap:6px; color:#7c391e; font-weight:650}
+#stem-pair-form {margin-bottom:28px}
+#stem-pair-form label {display:grid; gap:10px; font-weight:650; min-width:0}
+#stem-pair-form input {max-width:100%; min-width:0; font:inherit; font-size:.83rem}
+#stem-pair-form input::file-selector-button {border-radius:5px; border:1px solid var(--line); background:#f1f3f2; padding:6px 9px; margin-right:8px; font:inherit; cursor:pointer}
+.pair-actions {display:flex; align-items:center; flex-wrap:wrap; gap:10px; margin-top:12px}
+.pair-actions p {margin:0}
+.output:has(#stem-vocal-export:not([hidden])) {flex-wrap:wrap}
 dialog {width:min(440px,calc(100% - 28px)); border:1px solid #d6d9d9; border-radius:16px; padding:0; color:var(--ink); box-shadow:0 20px 85px #0003; max-height:85dvh}
 dialog::backdrop {background:#10121380; backdrop-filter:blur(3px)}
 .dialog-body {padding:24px}

@@ -12,6 +12,7 @@ import threading
 import uuid
 from pathlib import Path
 from typing import Literal
+from urllib.parse import quote
 
 import numpy as np
 import soundfile as sf
@@ -26,6 +27,7 @@ from ..services.studio_history import StudioLibrary, direct_directory, erase, fi
 from worker.pipeline.studio import decode_file, measurements, peak_db, render_audio, separate_audio
 from worker.pipeline.stages.band_repair import spectral_edge
 from worker.pipeline.stages.peak_repair import prepare_peak_repair
+from worker.pipeline.stages.pcm24 import write_pcm24
 
 
 router = APIRouter(prefix="/api/studio")
@@ -40,6 +42,11 @@ EXAMPLES = {
 }
 
 
+class TimeRange(BaseModel):
+    start: float = Field(ge=0, allow_inf_nan=False)
+    end: float = Field(gt=0, allow_inf_nan=False)
+
+
 class Recipe(BaseModel):
     repair: bool = False
     clarity: int = Field(default=0, ge=0, le=100)
@@ -49,6 +56,11 @@ class Recipe(BaseModel):
     bass: int = Field(default=0, ge=0, le=100)
     rhythm: int = Field(default=0, ge=0, le=100)
     velvet: int = Field(default=0, ge=0, le=100)
+    fullness: int = Field(default=0, ge=0, le=100)
+    bits: Literal[0, 8, 12, 16, 24] = 0
+    dither: bool = False
+    region: TimeRange | None = None
+    output: Literal["mix", "vocals"] = "mix"
 
 
 def workspace(request, response=None):
@@ -149,6 +161,10 @@ def prepare_track(folder, source, name, example=None):
         "channels": channels, "duration": len(audio) / rate, "recommended": recommended, "analysis": analysis,
         "metrics": measurements(audio, rate, peak_db(audio)),
     }
+    return save_track(folder, info)
+
+
+def save_track(folder, info):
     pending = folder / "track.part.json"
     pending.write_text(json.dumps(info, ensure_ascii=False), encoding="utf-8")
     pending.replace(folder / "track.json")
@@ -160,10 +176,41 @@ def health():
     return {"status": "ready"}
 
 
+def sample_songs():
+    data = BASE_DIR / "data"
+    folder = data / "sound"
+    if not direct_directory(data, folder):
+        return []
+    extensions = {".wav", ".flac", ".mp3", ".m4a", ".ogg", ".opus", ".aac", ".aif", ".aiff"}
+    return sorted((p for p in folder.iterdir() if p.suffix.lower() in extensions and file_ok(p)),
+                  key=lambda p: p.name.casefold())
+
+
+@router.get("/sample-songs")
+def list_sample_songs():
+    return {"songs": [{"name": p.stem, "url": "/api/studio/sample-songs/" + quote(p.name, safe="")}
+                      for p in sample_songs()]}
+
+
+@router.get("/sample-songs/{filename}")
+def sample_song_audio(filename: str):
+    for path in sample_songs():
+        if path.name == filename:
+            return FileResponse(path)
+    raise HTTPException(404, "샘플 음원을 찾을 수 없습니다.")
+
+
 @router.get("/examples/{key}")
-def example(key: Literal["midnight", "compressed", "clipped"], request: Request, response: Response):
-    filename, title = EXAMPLES[key]
-    source = BASE_DIR / "frontend" / filename
+def example(key: Literal["midnight", "compressed", "clipped", "library"], request: Request, response: Response):
+    songs = sample_songs() if key == "library" else []
+    if songs:
+        source = songs[0]
+        filename, title = "data/sound/" + source.name, source.stem
+    else:
+        if key == "library":
+            key = "clipped"
+        filename, title = EXAMPLES[key]
+        source = BASE_DIR / "frontend" / filename
     if not source.is_file():
         raise HTTPException(404, "예제 음원을 찾을 수 없습니다.")
     scope = workspace(request, response)
@@ -180,32 +227,47 @@ def example(key: Literal["midnight", "compressed", "clipped"], request: Request,
         return prepare_track(folder, source, title, key)
 
 
-@router.post("/tracks", status_code=201)
-def upload(request: Request, response: Response, file: UploadFile = File(...)):
+def store_upload(folder, file, stem, extensions=None):
     limits = Config.get_contract()["upload_limits"]
     name = Path(file.filename or "track").name
     ext = Path(name).suffix.lower()
+    if extensions and ext not in extensions:
+        raise HTTPException(415, "보컬과 반주를 각각 WAV 파일로 선택하세요.")
     if ext not in limits["allowed_extensions"]:
         raise HTTPException(415, "WAV, FLAC, MP3, M4A 파일을 선택하세요.")
     limit = limits["max_file_size_bytes"]
     if file.size is not None and file.size > limit:
         raise HTTPException(413, "100 MB 이하의 음원을 선택하세요.")
+    source = folder / (stem + ext)
+    total = 0
+    with source.open("xb") as target:
+        while chunk := file.file.read(1024 * 1024):
+            total += len(chunk)
+            if total > limit:
+                raise HTTPException(413, "100 MB 이하의 음원을 선택하세요.")
+            target.write(chunk)
+    return source
+
+
+@router.post("/tracks", status_code=201)
+def upload(request: Request, response: Response, file: UploadFile = File(...)):
+    def prepare(folder):
+        source = store_upload(folder, file, "upload")
+        try:
+            name = file.filename or "track"
+            return prepare_track(folder, source, Path(name).stem)
+        finally:
+            source.unlink()
+    return create_track(request, response, prepare)
+
+
+def create_track(request, response, prepare):
     scope = workspace(request, response)
     folder = library.home(scope) / uuid.uuid4().hex
     folder.mkdir()
-    source = folder / ("upload" + ext)
     try:
-        total = 0
-        with source.open("xb") as target:
-            while chunk := file.file.read(1024 * 1024):
-                total += len(chunk)
-                if total > limit:
-                    raise HTTPException(413, "100 MB 이하의 음원을 선택하세요.")
-                target.write(chunk)
         with library.lock(scope, folder.name):
-            info = prepare_track(folder, source, Path(name).stem)
-            source.unlink()
-        return info
+            return prepare(folder)
     except Exception as exc:
         shutil.rmtree(folder, ignore_errors=True)
         if isinstance(exc, HTTPException):
@@ -213,6 +275,58 @@ def upload(request: Request, response: Response, file: UploadFile = File(...)):
         if isinstance(exc, (subprocess.CalledProcessError, ValueError, sf.LibsndfileError)):
             raise HTTPException(422, "음원을 읽을 수 없습니다. 파일 형식을 확인하세요.") from exc
         raise
+
+
+def read_stem(path):
+    with sf.SoundFile(path) as source:
+        if source.format not in {"WAV", "WAVEX", "RF64"} or source.channels not in (1, 2):
+            raise HTTPException(422, "모노 또는 스테레오 WAV 스템을 선택하세요.")
+        audio = source.read(dtype="float32", always_2d=True)
+        if not len(audio) or not np.isfinite(audio).all():
+            raise ValueError("유효한 오디오 샘플이 없습니다.")
+        return audio, source.samplerate
+
+
+@router.post("/tracks/stem-pair", status_code=201)
+def upload_stem_pair(request: Request, response: Response, vocals: UploadFile = File(...),
+                     instrumental: UploadFile = File(...)):
+    def prepare(folder):
+        vocal_path = store_upload(folder, vocals, "vocal-input", {".wav"})
+        backing_path = store_upload(folder, instrumental, "backing-input", {".wav"})
+        voice, rate = read_stem(vocal_path)
+        backing, backing_rate = read_stem(backing_path)
+        if rate != backing_rate:
+            decode_file(backing_path, folder / "resampled.wav", backing.shape[1], rate)
+            backing, _ = read_stem(folder / "resampled.wav")
+            (folder / "resampled.wav").unlink()
+        duration = max(len(voice), len(backing))
+        voice = np.pad(voice, ((0, duration - len(voice)), (0, 0)))
+        backing = np.pad(backing, ((0, duration - len(backing)), (0, 0)))
+        sf.write(folder / "vocals.wav", voice, rate, subtype="FLOAT")
+        sf.write(folder / "instrumental.wav", backing, rate, subtype="FLOAT")
+        # Reserve space for a processed vocal at the master ceiling. Original
+        # and processed mixes share the same accompaniment level.
+        ceiling = 10 ** (-1 / 20)
+        vocal_peak = max(ceiling, 10 ** (peak_db(voice) / 20))
+        backing_peak = 10 ** (peak_db(backing) / 20)
+        mix_gain = float(min(1., ceiling / (vocal_peak + backing_peak)))
+        mixed = (voice + backing) * np.float32(mix_gain)
+        sf.write(folder / "source.wav", mixed, rate, subtype="FLOAT")
+        analysis = prepare_peak_repair(folder, voice, rate) or {"kind": "none"}
+        info = {
+            "id": folder.name, "name": Path(vocals.filename or "vocals").stem + " + " +
+                Path(instrumental.filename or "instrumental").stem,
+            "stemPair": True, "hasStems": True, "mixGain": mix_gain, "example": None,
+            "format": "WAV", "bitrate": 0, "channels": mixed.shape[1], "vocalChannels": voice.shape[1], "rate": rate,
+            "duration": duration / rate, "analysis": analysis,
+            "recommended": {"repair": analysis["kind"] == "peaks", "clarity": 0,
+                            "deess": 0, "width": 0, "restore": 0},
+            "metrics": measurements(mixed, rate, peak_db(mixed)),
+        }
+        vocal_path.unlink()
+        backing_path.unlink()
+        return save_track(folder, info)
+    return create_track(request, response, prepare)
 
 
 @router.get("/tracks/{track_id}/audio")
@@ -224,14 +338,33 @@ async def original(track_id: uuid.UUID, request: Request):
 
 
 @router.post("/tracks/{track_id}/render")
-def render(track_id: uuid.UUID, recipe: Recipe, request: Request, archive_only: bool = False):
+def render(track_id: uuid.UUID, recipe: Recipe, request: Request, archive_only: bool = False,
+           preview: bool = False):
     scope = request_scope(request)
-    settings = recipe.model_dump()
-    keep = archive_only or any(settings.values())
+    settings = recipe.model_dump(exclude_none=True)
+    if recipe.output == "mix":
+        settings.pop("output")  # Keep IDs of existing history versions stable.
+    if not recipe.bits or not recipe.dither:
+        settings.pop("dither")
+    for field in ("fullness", "bits"):
+        if not settings[field]:
+            settings.pop(field)
+    if archive_only and (preview or recipe.output == "vocals"):
+        raise HTTPException(422, "합본 출력에 적용한 설정만 히스토리에 저장할 수 있습니다.")
+    keep = recipe.output == "mix" and not preview and (archive_only or any(settings.values()))
     with library.lock(scope, track_id.hex):
         entry = entry_for(scope, track_id.hex)
         try:
             folder = library.promote(scope, entry, prepare_track) if keep or not entry.tracks else entry.tracks[0]
+            info = read_json(folder / "track.json")
+            if recipe.output == "vocals" and not info.get("stemPair"):
+                raise HTTPException(422, "보컬 단독 출력에는 보컬과 반주 스템이 필요합니다.")
+            if recipe.region:
+                stream = sf.info(folder / "source.wav")
+                if (recipe.region.end > stream.duration + .49 / stream.samplerate or
+                        recipe.region.start >= recipe.region.end or
+                        round(recipe.region.start * stream.samplerate) >= round(recipe.region.end * stream.samplerate)):
+                    raise HTTPException(422, "음원 안에서 시작보다 뒤에 있는 끝 지점을 선택하세요.")
             saved = saved_version(folder, version_id(settings)) if keep else None
             if saved:
                 if archive_only:
@@ -242,7 +375,7 @@ def render(track_id: uuid.UUID, recipe: Recipe, request: Request, archive_only: 
                 with _render_slots:
                     audio, rate, stats = render_audio(folder, **settings)
                     wav = io.BytesIO()
-                    sf.write(wav, audio, rate, format="WAV", subtype="PCM_24")
+                    write_pcm24(wav, audio, rate)
                     body = wav.getvalue()
                 if keep:
                     library.save_version(folder, settings, body, stats)
@@ -250,6 +383,8 @@ def render(track_id: uuid.UUID, recipe: Recipe, request: Request, archive_only: 
                 return Response(status_code=204)
             return Response(body, media_type="audio/wav",
                             headers={"X-Audio-Metrics": json.dumps(stats), "Cache-Control": "private, no-store"})
+        except HTTPException:
+            raise
         except Exception as exc:
             logger.exception("Studio render failed for %s", track_id)
             raise HTTPException(500, "보정본을 만들거나 저장하지 못했습니다. 다시 시도하세요.") from exc

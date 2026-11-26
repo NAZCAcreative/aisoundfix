@@ -61,6 +61,21 @@ test('a short repair between display samples is still detectable', () => {
   assert.equal(hasSignalChange(audioBuffer(dry, dry), audioBuffer(dry, wet)), true);
 });
 
+test('matching uses measured loop levels only for the corresponding region', () => {
+  const player = new StudioPlayer(() => {});
+  player.original = { duration: 4 };
+  player.originalLevel = -18;
+  const levels = {start: 1, end: 2, originalLufs: -21, processedLufs: -14};
+  player.setRendered({ duration: 4 }, -17, 'processed', 1, true, levels);
+  player.setRegion({start: 1, end: 2});
+  assert.deepEqual(player.monitorLevels, [-21, -14]);
+  player.setRegion({start: 1, end: 3});
+  assert.deepEqual(player.monitorLevels, [-18, -17]);
+  player.setRegion({start: 1, end: 2});
+  player.setRendered({ duration: 4 }, -17, 'processed', 1, true, {...levels, processedLufs:null});
+  assert.deepEqual(player.monitorLevels, [-18, -17]);
+});
+
 test('a cancelled audio-context resume cannot start a later playback request', async () => {
   const player = new StudioPlayer(() => {});
   player.original = { duration: 5 };

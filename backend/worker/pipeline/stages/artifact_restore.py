@@ -3,14 +3,12 @@ from pathlib import Path
 
 import numpy as np
 import soundfile as sf
-import torch
 
 APOLLO_DIR = Path(__file__).resolve().parents[4] / "vendor" / "Apollo"
 if str(APOLLO_DIR) not in sys.path:
     sys.path.insert(0, str(APOLLO_DIR))
 
 _model = None
-_device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Apollo runs full-sequence attention with no chunking of its own, so memory
 # scales with input length. A ~2-3 min song can try to allocate 10+ GiB in a
@@ -24,6 +22,7 @@ def _get_model():
     if _model is not None:
         return _model
 
+    import torch
     import look2hear.models as models
     from huggingface_hub import hf_hub_download, try_to_load_from_cache
 
@@ -35,17 +34,20 @@ def _get_model():
 
     model = models.Apollo(sr=44100, win=20, feature_dim=256, layer=6)
     model.load_state_dict(state_dict)
-    model = model.to(_device).eval()
+    model = model.to("cuda" if torch.cuda.is_available() else "cpu").eval()
 
     _model = model
     return _model
 
 
 def _run_model_on_chunk(model, chunk: np.ndarray) -> np.ndarray:
+    import torch
+
+    device = next(model.parameters()).device
     with torch.no_grad():
-        x = torch.from_numpy(chunk).unsqueeze(0).unsqueeze(0).to(_device)
+        x = torch.from_numpy(chunk).unsqueeze(0).unsqueeze(0).to(device)
         out = model(x).squeeze(0).squeeze(0).cpu().numpy()
-    if _device == "cuda":
+    if device.type == "cuda":
         torch.cuda.empty_cache()
     return out
 

@@ -13,8 +13,9 @@ from scipy.signal import resample_poly
 
 from .stages.artifact_restore import run_artifact_restore
 from .stages.band_repair import repair_band
-from .stages.dsp_utils import apply_biquad, peaking_coeffs, true_peak_db
+from .stages.dsp_utils import apply_biquad, low_shelf_coeffs, peaking_coeffs, true_peak_db
 from .stages.polish import _deess
+from .stages.pcm24 import quantize_samples
 from .stages.sound_lab import ghost_bass, rhythm_focus, velvet_room
 from .stages.stem_separate import run_stem_separate
 
@@ -59,12 +60,12 @@ def decode_file(source, destination, channels, rate=None):
     subprocess.run([*args, str(destination)], capture_output=True, check=True)
 
 
-def apollo_delta(folder, source, rate):
+def apollo_delta(folder, source, rate, source_name="source.wav"):
     cached = folder / "apollo-delta.wav"
     with GPU_LOCK:
         if not cached.is_file():
             work = folder / "apollo-input.wav"
-            decode_file(folder / "source.wav", work, source.shape[1], 44100)
+            decode_file(folder / source_name, work, source.shape[1], 44100)
             original, _ = sf.read(work, dtype="float32", always_2d=True)
             if len(original) < 1024 or np.max(np.abs(original)) < 1e-7:
                 residual = np.zeros_like(source)
@@ -103,17 +104,20 @@ def band_version(folder, sound, rate, edge):
 
 
 def render_audio(folder: Path, clarity: int, deess: int, width: int, restore: int,
-                 bass: int = 0, rhythm: int = 0, velvet: int = 0, repair: bool = False):
-    analysis = {}
-    if repair:
-        analysis = json.loads((folder / "track.json").read_text(encoding="utf-8")).get("analysis", {})
+                 bass: int = 0, rhythm: int = 0, velvet: int = 0, repair: bool = False,
+                 region=None, output="mix", fullness=0, bits=0, dither=False):
+    metadata = folder / "track.json"
+    info = json.loads(metadata.read_text(encoding="utf-8")) if metadata.is_file() else {}
+    paired = info.get("stemPair", False)
+    analysis = info.get("analysis", {}) if repair else {}
     kind = analysis.get("kind")
-    source = "peaks.wav" if kind == "peaks" else "source.wav"
+    dry_name = "vocals.wav" if paired else "source.wav"
+    source = "peaks.wav" if kind == "peaks" else dry_name
     sound, rate = sf.read(folder / source, dtype="float32", always_2d=True)
     if kind == "band":
         sound = band_version(folder, sound, rate, analysis["edgeHz"])
     elif restore:
-        sound += apollo_delta(folder, sound, rate) * (restore / 100)
+        sound += apollo_delta(folder, sound, rate, dry_name) * (restore / 100)
     if clarity:
         amount = clarity / 100
         for freq, db, q in [(300, -3.5 * amount, .85), (3400, 5 * amount, 1.0)]:
@@ -123,6 +127,9 @@ def render_audio(folder: Path, clarity: int, deess: int, width: int, restore: in
         high = min(9200, rate * .45)
         sound = _deess(sound, rate, low=min(4200, high * .53), high=high,
                        threshold_db=-21 - .20 * deess, ratio=1 + .07 * deess).astype("float32")
+    if fullness:
+        b, a = low_shelf_coeffs(min(220, rate * .42), 4 * fullness / 100, rate, slope=1)
+        sound = apply_biquad(sound, b, a).astype("float32")
     if width and sound.shape[1] == 2:
         side = (sound[:, 0] - sound[:, 1]) * (.004 * width)
         sound[:, 0] += side
@@ -135,14 +142,63 @@ def render_audio(folder: Path, clarity: int, deess: int, width: int, restore: in
         sound = velvet_room(sound, rate, velvet / 100)
     if not np.isfinite(sound).all():
         raise ValueError("처리 결과를 확인할 수 없습니다.")
-    peak = peak_db(sound)
+    # Keep filter history leading into the excerpt, then blend only the chosen
+    # samples. Limit the wet excerpt before blending so other frames stay dry.
+    start, end = 0, len(sound)
+    if region:
+        start, end = (round(region[key] * rate) for key in ("start", "end"))
+        if not 0 <= start < end <= len(sound):
+            raise ValueError("유효하지 않은 보정 구간입니다.")
+    wet = sound[start:end]
+    peak = peak_db(wet)
     ceiling_gain = 1.0
-    if peak > -1:
-        ceiling_gain = float(10 ** ((-1 - peak) / 20))
-        sound *= ceiling_gain
-        peak = -1
+    # For an imported pair the dry mix already has fixed headroom. A bypass
+    # must reproduce that mix even when the dry vocal alone is above -1 dBTP.
+    bypass_pair = paired and output == "mix" and not any((kind in ("peaks", "band"), clarity,
+                                                          deess, width, restore, rhythm, bass, velvet,
+                                                          fullness, bits))
+    ceiling_db = -1.
+    if bits:
+        # Each phase of the 4x true-peak interpolator has coefficient L1 norm
+        # below 2.25. Reserve its worst-case rounding/dither overshoot so the
+        # final samples can remain on the exact quantization grid.
+        max_error = (1.5 if dither else .5) / (1 << (bits - 1))
+        ceiling_db = 20 * math.log10(10 ** (-1 / 20) - 2.25 * max_error)
+    if peak > ceiling_db and not bypass_pair:
+        ceiling_gain = float(10 ** ((ceiling_db - peak) / 20))
+        wet *= ceiling_gain
+    if bits:
+        quantize_samples(wet, bits, dither)
+    if region:
+        dry, _ = sf.read(folder / dry_name, dtype="float32", always_2d=True)
+        fade = min(round(.005 * rate), len(wet) // 2)
+        if fade:
+            # Complementary amplitudes preserve identical dry/wet audio. A
+            # half cosine also eases the change of gain at both boundaries.
+            phase = np.linspace(0, np.pi, fade, dtype="float64")
+            ramp = ((1 - np.cos(phase)) * .5).astype("float32")[:, None]
+            if start:
+                wet[:fade] = dry[start:start+fade] + ramp * (wet[:fade] - dry[start:start+fade])
+            if end < len(dry):
+                wet[-fade:] = dry[end-fade:end] + ramp[::-1] * (wet[-fade:] - dry[end-fade:end])
+        dry[start:end] = wet
+        sound = dry
+    if paired and output == "mix":
+        backing, _ = sf.read(folder / "instrumental.wav", dtype="float32", always_2d=True)
+        sound = (sound + backing) * np.float32(info["mixGain"])
+    peak = peak_db(sound) if paired or region or bits else peak + 20 * math.log10(ceiling_gain)
     stats = measurements(sound, rate, peak)
-    stats["ceilingGain"] = ceiling_gain
+    if region:
+        original_path = folder / ("vocals.wav" if output == "vocals" else "source.wav")
+        reference, _ = sf.read(original_path, start=start, stop=end, dtype="float32", always_2d=True)
+        stats["regionLevels"] = {
+            **region,
+            "originalLufs": loudness(reference, rate),
+            "processedLufs": loudness(sound[start:end], rate),
+        }
+    # The monitor removes a whole-file gain when testing for an audible change.
+    # A gain confined to an excerpt or vocal stem is part of the actual edit.
+    stats["ceilingGain"] = 1.0 if region or (paired and output == "mix") else ceiling_gain
     return sound, rate, stats
 
 

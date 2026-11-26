@@ -7,8 +7,8 @@
   <meta name="description" content="선명도, 치찰음, 스테레오 폭과 AI 압축 복원을 직접 조절하는 AIsoundFix 오디오 스튜디오.">
   <title>복원 스튜디오 · AIsoundFix</title>
   <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="./css/studio.css?v=20261122-history">
-  <script type="module" src="./js/studio.js?v=20261122-history2"></script>
+  <link rel="stylesheet" href="./css/studio.css?v=20261125-tone">
+  <script type="module" src="./js/studio.js?v=20261125-tone"></script>
 </head>
 <body>
   <a class="skip" href="#main">작업 화면으로 이동</a>
@@ -18,7 +18,7 @@
       <div class="nav-set"><p class="nav-label">작업 공간</p>
         <a class="nav-item active" href="#studio" data-view="studio" aria-label="복원 스튜디오" aria-current="page"><i data-icon="sliders"></i><span>복원<span class="nav-long"> 스튜디오</span></span></a>
         <a class="nav-item" href="#lab" data-view="lab" aria-label="사운드 랩"><i data-icon="lab"></i><span>사운드 랩</span></a>
-        <a class="nav-item" href="#stems" data-view="stems" aria-label="스템 분리"><i data-icon="layers"></i><span>스템<span class="nav-long"> 분리</span></span></a>
+        <a class="nav-item" href="#stems" data-view="stems" aria-label="스템 작업"><i data-icon="layers"></i><span>스템<span class="nav-long"> 작업</span></span></a>
       </div>
       <div class="nav-set nav-library"><p class="nav-label">라이브러리</p>
         <button class="nav-item" data-open="examples"><i data-icon="disc"></i><span>예제 트랙</span></button>
@@ -30,7 +30,9 @@
     <header class="topbar"><div class="crumb"><i data-icon="grid"></i><span>작업 공간</span><i data-icon="chevron"></i><strong id="crumb-current">복원 스튜디오</strong></div><div class="top-actions"><a id="history-open" class="guide-link" href="#history" aria-haspopup="dialog"><i data-icon="history"></i>히스토리</a><button class="guide-link" data-open="guide"><i data-icon="help"></i><span>사용 가이드</span></button></div></header>
     <main id="main" tabindex="-1">
       <header class="page-heading"><div><h1 id="page-title">복원 스튜디오</h1><p id="page-intro">음원을 불러와 복원할 부분을 확인하고 원본과 비교하세요.</p></div>
-        <button id="upload" class="button primary"><i data-icon="upload"></i>음원 불러오기</button>
+        <div class="heading-actions">
+          <button id="upload" class="button primary"><i data-icon="upload"></i>음원 불러오기</button>
+        </div>
         <input id="file-input" type="file" accept=".mp3,.wav,.flac,.m4a" hidden>
       </header>
       <div id="notice" class="notice" role="alert" hidden><span></span><button aria-label="알림 닫기"><i data-icon="close"></i></button></div>
@@ -46,6 +48,13 @@
           <div class="wave-block">
             <div class="wave-track"><canvas id="waveform" aria-hidden="true"></canvas><span id="repair-range" aria-hidden="true" hidden></span><input id="seek" type="range" min="0" max="1000" step="1" value="0" aria-label="재생 위치" disabled></div>
             <div id="ruler" class="ruler" aria-hidden="true"></div>
+            <div class="region-controls" role="group" aria-label="보정 구간 선택">
+              <span>파형을 드래그하거나 시간을 입력하세요.</span>
+              <label>시작(초) <input id="region-start" type="number" min="0" step="0.01" disabled></label>
+              <label>끝(초) <input id="region-end" type="number" min="0" step="0.01" disabled></label>
+              <button id="region-select" type="button" disabled>구간 선택</button>
+              <button id="region-clear" type="button" disabled>전체 곡 선택</button>
+            </div>
           </div>
         </div>
         <div class="transport">
@@ -58,6 +67,28 @@
         </div>
         <p id="compare-note" class="compare-note" role="status">음원을 불러오면 원본과 보정을 비교할 수 있습니다.</p>
       </section>
+      <section id="tone-panel" aria-labelledby="tone-title">
+        <div class="tone-heading"><h2 id="tone-title">음색 미리듣기</h2><span>효과를 눌러 듣고 A/B로 비교하세요.</span></div>
+        <div class="tone-grid">
+          <div class="tone-card">
+            <button id="tone-quant" class="tone-toggle" type="button" aria-pressed="false" disabled><i data-icon="wave" aria-hidden="true"></i>양자화</button>
+            <div class="tone-setting"><select id="tone-bits" aria-label="양자화 비트 깊이" disabled><option value="0">꺼짐</option><option value="8">8비트</option><option value="12">12비트</option><option value="16">16비트</option><option value="24">24비트</option></select><label><input id="tone-dither" type="checkbox" disabled> 디더</label></div>
+          </div>
+          <div class="tone-card">
+            <button id="tone-fullness" class="tone-toggle" type="button" aria-pressed="false" title="낮은 음역을 올려 베이스와 킥의 두께를 조절합니다." disabled><i data-icon="layers" aria-hidden="true"></i>풍성함</button>
+            <div class="tone-setting"><input id="tone-fullness-mix" type="range" min="0" max="100" value="0" aria-label="풍성함 강도" disabled><output for="tone-fullness-mix">0%</output></div>
+          </div>
+          <div class="tone-card">
+            <button id="tone-width" class="tone-toggle" type="button" aria-pressed="false" disabled><i data-icon="sliders" aria-hidden="true"></i>입체감</button>
+            <div class="tone-setting"><input id="tone-width-mix" type="range" min="0" max="100" value="0" aria-label="입체감 강도" disabled><output for="tone-width-mix">0%</output></div>
+          </div>
+        </div>
+        <div id="tone-actions" class="trial-actions" hidden>
+          <p id="tone-status" role="status"></p>
+          <button type="button" id="tone-apply" class="button dark" disabled>출력에 적용</button>
+          <button type="button" id="tone-cancel" class="button quiet">취소</button>
+        </div>
+      </section>
       <section class="repair-panel" id="repair-panel" aria-labelledby="diagnosis-title">
         <div class="repair-heading">
           <h2 id="diagnosis-title"><i data-icon="wave" aria-hidden="true"></i>음원 복원</h2>
@@ -68,7 +99,17 @@
           <li><div><h3>잘린 피크 복원</h3><span id="peaks-status" class="method-status">대기</span></div><p id="peaks-detail">무손실 음원에서 잘려 평평해진 파형의 꼭대기를 복원합니다.</p></li>
           <li><div><h3>고역 복원</h3><span id="band-status" class="method-status">대기</span></div><p id="band-detail">고음이 급격히 줄어든 48 kbps MP3의 높은 음역을 보완합니다.</p></li>
         </ul>
+        <div class="symptoms" role="group" aria-label="증상별 효과 미리듣기">
+          <button type="button" class="button quiet" data-trial="deess" disabled>ㅅ 소리가 튀어요 · 치찰음 완화 듣기</button>
+          <button type="button" class="button quiet" data-trial="clarity" disabled>소리가 먹먹해요 · 선명도 EQ 듣기</button>
+        </div>
+        <div id="trial-actions" class="trial-actions" hidden>
+          <p id="trial-status" role="status"></p>
+          <button type="button" id="trial-apply" class="button dark" disabled>출력에 적용</button>
+          <button type="button" id="trial-cancel" class="button quiet">미리듣기 닫기</button>
+        </div>
         <div class="repair-actions">
+          <button type="button" id="region-apply" class="button quiet" hidden>선택 구간에 현재 설정 적용</button>
           <label id="repair-control"><input id="repair-toggle" type="checkbox" aria-describedby="diagnosis-detail" disabled> 진단된 복원 적용</label>
           <button class="button recommend" id="recommend" disabled><i data-icon="play"></i><span>복원 비교 듣기</span></button>
         </div>
@@ -90,10 +131,20 @@
         <section class="output" aria-labelledby="output-title">
           <div class="output-name"><span class="output-icon"><i data-icon="export"></i></span><div><h2 id="output-title">마스터 출력</h2><p id="render-status" role="status" aria-live="polite">준비 중</p></div></div>
           <dl class="meters"><div><dt>통합 음량</dt><dd id="lufs">—</dd></div><div><dt>트루피크</dt><dd id="peak">—</dd></div><div><dt>출력 포맷</dt><dd>WAV <small>24-bit</small></dd></div></dl>
+          <button type="button" id="stem-vocal-export" class="button quiet" hidden disabled>보컬 WAV 저장</button>
           <button id="export" class="button dark" disabled><i data-icon="download"></i><span>WAV 저장</span></button>
         </section>
       </div>
       <section class="stems" id="stems-view" aria-labelledby="stems-title" hidden>
+        <form id="stem-pair-form" aria-labelledby="stem-pair-title">
+          <div class="section-heading"><h2 id="stem-pair-title">보컬·반주 WAV 불러오기</h2></div>
+          <p class="section-note">Suno에서 같은 시작점으로 내보낸 두 파일을 선택하세요. 스튜디오에서 보컬에만 효과를 적용하고 반주와 함께 A/B로 들어볼 수 있습니다.</p>
+          <div class="stem-grid">
+            <label class="stem-card" for="stem-pair-vocals"><span>보컬 WAV</span><input id="stem-pair-vocals" name="vocals" type="file" accept=".wav,audio/wav" required></label>
+            <label class="stem-card" for="stem-pair-instrumental"><span>반주 WAV</span><input id="stem-pair-instrumental" name="instrumental" type="file" accept=".wav,audio/wav" required></label>
+          </div>
+          <div class="pair-actions"><button class="button primary" id="stem-pair-open" type="submit" disabled><i data-icon="upload"></i>보컬 보정 시작</button><p class="section-note" id="stem-pair-status" role="status">WAV 파일당 최대 100 MB</p></div>
+        </form>
         <div class="section-heading"><div class="heading-line"><h2 id="stems-title">보컬과 반주</h2></div><button id="split" class="button dark"><i data-icon="layers"></i>스템 분리 시작</button></div>
         <p id="stem-status" class="section-note" role="status">현재 트랙의 원본에서 보컬과 반주 WAV를 추출합니다.</p>
         <div class="stem-grid">
@@ -113,15 +164,17 @@
     <div class="confirm-actions"><button id="confirm-cancel" class="button quiet" autofocus>취소</button><button id="confirm-remove" class="button remove">삭제</button></div>
   </div></dialog>
   <dialog id="examples" aria-labelledby="examples-title"><div class="dialog-body"><div class="dialog-heading"><h2 id="examples-title">예제 트랙</h2><button data-close aria-label="닫기"><i data-icon="close"></i></button></div><p>피크가 잘린 연주와 두 가지 MP3를 스튜디오에서 비교하세요.</p>
+    <button class="example" data-example="library"><span class="example-cover"><i data-icon="music"></i></span><span><b>기본 샘플 곡</b><small>현재 스튜디오의 기본 음악</small></span><i data-icon="play"></i></button>
     <button class="example" data-example="clipped"><span class="example-cover peak-example"><i data-icon="wave"></i></span><span><b>드럼 피크 복원</b><small>하드 클리핑 · 무손실 FLAC · 0:08</small></span><i data-icon="play"></i></button>
     <button class="example" data-example="midnight"><span class="example-cover"></span><span><b>Midnight Circuit</b><small>오리지널 믹스 · 224 kbps · 0:24</small></span><i data-icon="play"></i></button>
     <button class="example" data-example="compressed"><span class="example-cover compressed"></span><span><b>Midnight Circuit · 48 kbps</b><small>압축 복원 테스트 · 0:24</small></span><i data-icon="play"></i></button>
   </div></dialog>
-<dialog id="guide" aria-labelledby="guide-title"><div class="dialog-body"><div class="dialog-heading"><h2 id="guide-title">스튜디오 사용 가이드</h2><button data-close aria-label="닫기"><i data-icon="close"></i></button></div><dl class="guide-list"><div><dt>트랙 불러오기</dt><dd>파일을 화면에 놓거나 ‘음원 불러오기’를 누르세요. WAV, FLAC, MP3, M4A를 최대 100 MB까지 지원합니다.</dd></div><div><dt>필터 조절하기</dt><dd>스위치로 필터를 켜고 슬라이더로 강도를 바꾸세요. 피크 복원은 짧게 잘린 피크가 확인된 무손실 음원에 자동 적용됩니다. ‘진단된 복원 적용’으로 끌 수 있습니다.</dd></div><div><dt>같은 구간 비교하기</dt><dd><kbd>Space</kbd>로 재생하고 <kbd>A</kbd>를 누르면 원본이, <kbd>B</kbd>를 누르면 보정본이 같은 위치에서 이어집니다. 켜 둔 효과가 없으면 B는 플레이어에 표시된 복원이나 선명도 EQ 70%를 켭니다. 피크를 복원할 때 ‘복원 비교 듣기’를 누르면 변화가 가장 큰 구간을 반복합니다. ‘전체 곡 듣기’로 돌아갈 수 있습니다.</dd></div><div><dt>완성본 받기</dt><dd>‘마스터 출력’에서 저장할 효과를 확인하세요. WAV에는 선택한 설정을 적용한 전체 곡이 담깁니다. 모니터 볼륨과 음량 맞춤은 미리듣기에 사용됩니다.</dd></div></dl></div></dialog>
+<dialog id="guide" aria-labelledby="guide-title"><div class="dialog-body"><div class="dialog-heading"><h2 id="guide-title">스튜디오 사용 가이드</h2><button data-close aria-label="닫기"><i data-icon="close"></i></button></div><dl class="guide-list"><div><dt>트랙 불러오기</dt><dd>파일을 화면에 놓거나 ‘음원 불러오기’를 누르세요. WAV, FLAC, MP3, M4A를 최대 100 MB까지 지원합니다.</dd></div><div><dt>필터 조절하기</dt><dd>스위치로 필터를 켜고 슬라이더로 강도를 바꾸세요. 피크 복원은 짧게 잘린 피크가 확인된 무손실 음원에 자동 적용됩니다. ‘진단된 복원 적용’으로 끌 수 있습니다.</dd></div><div><dt>같은 구간 비교하기</dt><dd><kbd>Space</kbd>로 재생하고 <kbd>A</kbd>를 누르면 원본이, <kbd>B</kbd>를 누르면 보정본이 같은 위치에서 이어집니다. 파형을 드래그하거나 시작·끝 시간을 입력해 한 구간을 반복할 수 있습니다. 증상별 효과를 듣고 ‘이 구간에만 적용’을 선택하면 해당 부분이 출력에 반영됩니다. 자동 피크 복원은 ‘복원 비교 듣기’에서 변화가 가장 큰 부분을 반복합니다.</dd></div><div><dt>완성본 받기</dt><dd>‘마스터 출력’에서 저장할 효과를 확인하세요. 선택 구간을 보정해도 WAV에는 앞뒤가 이어지는 전체 곡이 담깁니다. 모니터 볼륨과 음량 맞춤은 미리듣기에 사용됩니다.</dd></div></dl></div></dialog>
   <dialog id="research" aria-labelledby="research-title">
     <div class="dialog-body">
       <div class="dialog-heading"><h2 id="research-title">필터 연구 노트</h2><button data-close aria-label="닫기"><i data-icon="close"></i></button></div>
       <dl class="guide-list research-list">
+        <div><dt>PCM 비트 깊이와 디더</dt><dd>반올림과 디더를 사용한 두 버전을 무작위 순서로 들어볼 수 있습니다. <a href="./research/quantization/?blind=1">블라인드 청음 실험 열기 ↗</a></dd></div>
         <div><dt>곡별 피크 복원과 압축 음원 비교</dt><dd>잘린 피크 복원, 고역 대역 보정과 미처리본을 같은 음량으로 비교할 수 있습니다. <a href="./research/restoration/">블라인드 청음 열기 ↗</a></dd></div>
         <div><dt>벨벳 룸</dt><dd>짧은 펄스를 불규칙하게 배치하고 뒤로 갈수록 폭을 넓혀, 잔향의 고음이 먼저 가라앉게 했습니다. 스테레오에서는 좌우에 서로 다른 펄스열을 씁니다. <a href="https://research.aalto.fi/en/publications/non-exponential-reverberation-modeling-using-dark-velvet-noise/" target="_blank" rel="noopener noreferrer">Fagerström 외 · JAES 2024 ↗</a></dd></div>
         <div><dt>고스트 베이스</dt><dd>중앙의 32~110 Hz를 두 대역으로 나누고 각각 2·3차 배음을 합성합니다. 저음을 내기 어려운 스피커에서 베이스 음정을 따라갈 단서가 생깁니다. <a href="https://aes.org/publications/elibrary/elibrary-page/?id=11088" target="_blank" rel="noopener noreferrer">Larsen과 Aarts · JAES 2002 ↗</a></dd></div>

@@ -20,7 +20,7 @@ input{width:100%;accent-color:#a9e5c8}output{font-variant-numeric:tabular-nums;c
 <main>
 <a href="/">← 스튜디오</a>
 <h1>복원 블라인드 청음</h1>
-<p>같은 8초를 반복해 들으며 기준 원본에 가장 가까운 소리를 골라보세요. 재생 중에 소리를 바꾸면 같은 박자에서 이어집니다.</p>
+<p>기준 원본에 가장 가까운 소리를 골라보세요. 재생 중에 기준 원본과 후보를 누르면 같은 박자에서 소리가 바뀝니다.</p>
 <section>
 <label for="study">비교할 손상</label>
 <select id="study"><option value="peaks">피크가 잘린 녹음</option><option value="codec">48 kbps MP3 · 기존 프리셋과 AI 복원</option><option value="phase">48 kbps MP3 · 위상을 보존하는 복원</option></select>
@@ -31,6 +31,7 @@ input{width:100%;accent-color:#a9e5c8}output{font-variant-numeric:tabular-nums;c
 <div class="transport"><button id="play" type="button" class="primary">재생</button>
 <input type="range" id="seek" min="0" max="8" step=".01" value="0" aria-label="재생 위치">
 <output id="time" for="seek">0.0 / 8.0초</output></div>
+<button id="focus" type="button" aria-pressed="false" disabled>5.5–6.5초 피크 구간 반복</button>
 </section>
 <section>
 <label for="choice">기준 원본과 가장 비슷하게 들린 소리</label>
@@ -50,6 +51,10 @@ const byId = id => document.getElementById(id);
 const cache = new Map();
 let ctx, version = 0, buffers = {}, order = [], selected = "reference";
 let sources = [], playing = false, ready = false, offset = 0, started = 0, duration = 8;
+// Quiet boundaries around the one-second window with the largest clipping error.
+const peakExcerpt = {start:242195/44100, end:286480/44100};
+let loopStart = 0, loopEnd = 8;
+let focusPeaks = location.hash === "#peaks-focus";
 const letter = i => String.fromCharCode(65+i);
 function shuffled(items) {
   const copy = [...items];
@@ -60,7 +65,19 @@ function shuffled(items) {
   return copy;
 }
 function position() {
-  return playing ? (offset + Math.max(0, ctx.currentTime-started)) % duration : offset;
+  if (!playing) return offset;
+  const elapsed = Math.max(0, ctx.currentTime-started);
+  return loopStart + (offset-loopStart+elapsed) % (loopEnd-loopStart);
+}
+function setLoopRange() {
+  const focused = focusPeaks && byId("study").value === "peaks";
+  loopStart = focused ? peakExcerpt.start : 0;
+  loopEnd = focused ? peakExcerpt.end : duration;
+  const seek = byId("seek");
+  seek.min = loopStart;
+  seek.max = loopEnd;
+  seek.value = loopStart;
+  byId("focus").setAttribute("aria-pressed", String(focused));
 }
 function stop() {
   offset = position();
@@ -80,14 +97,15 @@ async function play() {
   started = ctx.currentTime + .025;
   sources = Object.entries(buffers).map(([key,buffer]) => {
     const source = ctx.createBufferSource(), gain = ctx.createGain();
-    source.buffer = buffer; source.loop = true; gain.gain.value = key===selected ? 1 : 0;
-    source.connect(gain); gain.connect(ctx.destination); source.start(started, offset % duration);
+    source.buffer = buffer; source.loop = true; source.loopStart = loopStart; source.loopEnd = loopEnd;
+    gain.gain.value = key===selected ? 1 : 0;
+    source.connect(gain); gain.connect(ctx.destination); source.start(started, offset);
     return {key, source, gain};
   });
   playing = true; byId("play").textContent = "일시정지";
 }
 function blindOrder() {
-  stop(); offset=0; selected="reference";
+  stop(); offset=loopStart; selected="reference";
   order = shuffled(Object.keys(samples[byId("study").value]));
   const choices = byId("choice"); choices.replaceChildren(new Option("선택하세요",""));
   const versions = byId("versions"); versions.replaceChildren();
@@ -100,12 +118,13 @@ function blindOrder() {
   }
   choices.add(new Option("구분하기 어려움","unsure")); choices.disabled=!ready;
   byId("answer").replaceChildren(); byId("again").hidden=true; byId("reveal").disabled=true;
-  byId("play").disabled=!ready; byId("seek").disabled=!ready;
+  byId("play").disabled=!ready; byId("seek").disabled=!ready; byId("focus").disabled=!ready;
 }
 function showError() { byId("status").textContent="음원을 불러오지 못했습니다. 페이지를 새로고침해 주세요."; }
 async function load() {
   const token = ++version;
   const type = byId("study").value;
+  byId("focus").hidden=type!=="peaks";
   ready=false; blindOrder(); byId("status").textContent="비교 음원을 불러오는 중…";
   ctx ??= new AudioContext();
   const pairs = await Promise.all(["reference",...Object.keys(samples[type])].map(async key=>{
@@ -118,12 +137,20 @@ async function load() {
     return [key,await cache.get(url)];
   }));
   if(token!==version) return;
-  buffers=Object.fromEntries(pairs); duration=buffers.reference.duration; byId("seek").max=duration;
+  buffers=Object.fromEntries(pairs); duration=buffers.reference.duration; setLoopRange();
   ready=true; blindOrder(); byId("status").textContent="모든 후보의 재생 음량을 맞췄습니다. 후보 순서는 무작위입니다.";
 }
 byId("study").onchange=()=>load().catch(showError);
 byId("play").onclick=()=>playing ? stop() : play().catch(showError);
-byId("seek").oninput=()=>{ const value=Number(byId("seek").value), resume=playing; stop(); offset=value%duration; if(resume) play().catch(showError); };
+byId("focus").onclick=()=>{
+  const resume = playing;
+  stop();
+  focusPeaks = !focusPeaks;
+  setLoopRange();
+  offset = loopStart;
+  if (resume) play().catch(showError);
+};
+byId("seek").oninput=()=>{ const value=Number(byId("seek").value), resume=playing; stop(); offset=value>=loopEnd ? loopStart : value; if(resume) play().catch(showError); };
 byId("choice").onchange=()=>{byId("reveal").disabled=!byId("choice").value;};
 byId("reveal").onclick=()=>{
   const choice=byId("choice"), labels=samples[byId("study").value], list=document.createElement("ul");
@@ -135,7 +162,7 @@ byId("reveal").onclick=()=>{
 byId("again").onclick=blindOrder;
 function tick() {
   const pos=position(); if(document.activeElement!==byId("seek") || playing) byId("seek").value=pos;
-  byId("time").textContent=pos.toFixed(1)+" / "+duration.toFixed(1)+"초";
+  byId("time").textContent=pos.toFixed(1)+" / "+loopEnd.toFixed(1)+"초";
   requestAnimationFrame(tick);
 }
 load().catch(showError); tick();

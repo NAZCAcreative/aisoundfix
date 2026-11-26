@@ -1,6 +1,9 @@
-import { StudioPlayer, hasSignalChange } from './studio-player.js?v=20261122-master';
+import { StudioPlayer, hasSignalChange } from './studio-player.js?v=20261125-tone';
 import { paintIcons, filterGraph, envelope, drawWave } from './studio-visuals.js?v=20261122-history';
 import { setupHistory } from './studio-history.js?v=20261122-history2';
+import { setupStemPair } from './studio-stems.js';
+import { setupSelection } from './studio-selection.js';
+import { setupToneControls, toneNames } from './studio-tone-controls.js';
 
 const $ = id => document.getElementById(id);
 const all = selector => [...document.querySelectorAll(selector)];
@@ -18,7 +21,6 @@ const labFilters = [
 const filters = [...restorationFilters, ...labFilters];
 const repairKinds = ['peaks','band'];
 const repairNames = {peaks:'잘린 피크 복원',band:'고역 복원'};
-const comparisonClarity = 70;
 const player = new StudioPlayer(refreshTransport);
 const state = Object.fromEntries(filters.map(f=>[f.key,{enabled:false,value:f.value}]));
 const nodes = {};
@@ -29,8 +31,13 @@ let requestedVersion=null;
 let renderedKey='', master=null, renderTimer=0, activeRender=null, preferred='processed';
 let renderFailed=false;
 let stemRequest=null, stemLinks=null;
-let auditionFor=null;
 let repairEnabled=false;
+let selectedRange=null, appliedRange=null, trial=null;
+let committedTone={};
+const selection=setupSelection({
+  duration:()=>track?.duration || 0, select:selectRange, message,
+  seek(time) {player.seek(time)}
+});
 let frame=0;
 let wavePeaks={};
 const cache=new Map();
@@ -43,12 +50,15 @@ function cueTime(seconds) {
 const keyOf = recipe => JSON.stringify(recipe);
 function recipe() {
   const manual=Object.fromEntries(filters.map(({key})=>[key,state[key].enabled ? state[key].value : 0]));
-  return {repair:repairEnabled,...manual};
+  const settings={repair:repairEnabled,...manual,...committedTone};
+  if(appliedRange && hasProcessing(settings)) settings.region=appliedRange;
+  return settings;
 }
-function hasProcessing(settings=recipe()) {return Object.values(settings).some(Boolean)}
-function effectNames() {
-  const names=filters.filter(f=>state[f.key].enabled).map(f=>f.name+' '+state[f.key].value+'%');
-  if(repairEnabled) names.unshift(repairNames[track.analysis.kind]);
+function hasProcessing(settings=recipe()) {return settings.repair || settings.bits>0 || settings.fullness>0 || filters.some(f=>settings[f.key]>0)}
+function rangeLabel(region) {return region ? cueTime(region.start)+'–'+cueTime(region.end) : '전체 곡'}
+function effectNames(settings=recipe()) {
+  const names=[...toneNames(settings), ...filters.filter(f=>f.key!=='width' && settings[f.key]>0).map(f=>f.name+' '+settings[f.key]+'%')];
+  if(settings.repair) names.unshift(repairNames[track?.analysis?.kind] || '진단 복원');
   return names;
 }
 function ready() {return !!track && !!master && renderedKey===keyOf(recipe()) && !loading}
@@ -91,7 +101,7 @@ function renderStatus(text,activity='',stats=null) {
 }
 function showMaster() {
   const names=effectNames();
-  const settings=names.length ? '저장 설정 · '+names.join(' + ') :
+  const settings=names.length ? '저장 설정 · '+rangeLabel(appliedRange)+' · '+names.join(' + ') :
     '필터 미적용'+(master.stats.ceilingGain<1?' · 출력 피크 조정':'');
   renderStatus(settings,'',master.stats);
 }
@@ -106,8 +116,7 @@ function diagnosisSummary(kind,manual) {
   } else if(kind==='band') {
     detail=track.bitrate+' kbps MP3에서 '+(track.analysis.edgeHz/1000).toLocaleString('ko-KR')+' kHz 위의 에너지가 급격히 줄었습니다.';
   } else {
-    const source=track.format==='MP3' && track.bitrate>0 ? track.bitrate+' kbps MP3' : '이 음원';
-    return source+'에는 자동 복원 대상이 없습니다. '+(manual?'켜 둔 필터의 결과를 원본과 비교할 수 있습니다.':'B로 선명도 EQ를 들어보거나 수동 필터를 직접 선택하세요.');
+    return '자동 검사는 무손실 파일의 잘린 피크와 48 kbps MP3의 고역 손실을 확인합니다. 이 파일에는 권장할 자동 복원이 없습니다. 거슬리는 소리를 골라 효과를 들어보세요.';
   }
   if(!repairEnabled) detail+=' 비교 듣기를 누르면 복원이 켜집니다.';
   if(manual) detail+=' 켜 둔 필터도 보정본에 함께 적용됩니다.';
@@ -133,7 +142,7 @@ function drawDiagnosis() {
   $('repair-toggle').checked=eligible && repairEnabled;
   $('repair-toggle').disabled=!eligible;
   $('recommend').disabled=loading || !track || (!eligible && !manual);
-  const comparing=!!player.region && !loading, waiting=auditionFor?.source==='repair';
+  const comparing=!!player.region && !selectedRange && !loading, waiting=trial?.source==='repair' && !trial.result;
   $('recommend').lastElementChild.textContent=waiting?'미리듣기 취소':comparing?'전체 곡 듣기':'복원 비교 듣기';
   iconIn($('recommend'),waiting?'close':comparing?'music':'play');
 }
@@ -156,9 +165,9 @@ function buildFilters() {
       listen.setAttribute('aria-label',f.name+' 듣기');
       card.append(listen);
       listen.onclick=()=>{
-        if(auditionFor?.source===f.key) cancelAudition();
+        if(trial?.source===f.key && !trial.result) discardTrial();
         else if(listen.getAttribute('aria-pressed')==='true') togglePlay();
-        else audition(f.key);
+        else previewEffect(f.key);
       };
     }
     nodes[f.key]={card,toggle,slider,listen,canvas:card.querySelector('canvas'),output:card.querySelector('output')};
@@ -178,7 +187,8 @@ function buildFilters() {
 }
 function drawFilters() {
   for(const f of filters) {
-    const s=state[f.key], n=nodes[f.key], locked=loading || !track || (f.key==='width' && track.channels===1);
+    const s=state[f.key], n=nodes[f.key], monoWidth=f.key==='width' && (track?.vocalChannels ?? track?.channels)===1;
+    const locked=loading || !track || monoWidth;
     const value=s.enabled?s.value:0;
     n.card.dataset.enabled=String(s.enabled);
     n.toggle.disabled=n.slider.disabled=locked;
@@ -187,7 +197,7 @@ function drawFilters() {
     n.slider.style.setProperty('--fill',value+'%');
     n.slider.setAttribute('aria-valuetext',value?value+'퍼센트':'꺼짐');
     n.output.textContent=value+'%';
-    n.card.querySelector('p').textContent=(f.key==='width' && track?.channels===1)?'스테레오 음원에서 사용할 수 있습니다.':f.description;
+    n.card.querySelector('p').textContent=monoWidth?(track.stemPair?'스테레오 보컬 스템에서 사용할 수 있습니다.':'스테레오 음원에서 사용할 수 있습니다.'):f.description;
     filterGraph(n.canvas,f.key,s.value,s.enabled,getComputedStyle(n.card).getPropertyValue('--accent').trim());
   }
   const active=filters.filter(f=>state[f.key].enabled);
@@ -200,9 +210,15 @@ function drawFilters() {
   $('reset').disabled=loading || !track;
 }
 function setRecipe(values,group=filters) {
+  if(group===filters) {
+    committedTone={};
+    if(values.bits) committedTone.bits=values.bits;
+    if(values.bits && values.dither) committedTone.dither=true;
+    if(values.fullness) committedTone.fullness=values.fullness;
+  }
   for(const {key,value} of group) {
     const next=values[key] || 0;
-    state[key].enabled=next>0 && !(key==='width' && track?.channels===1);
+    state[key].enabled=next>0 && !(key==='width' && (track?.vocalChannels ?? track?.channels)===1);
     state[key].value=next || value;
   }
 }
@@ -211,7 +227,7 @@ function drawTimeline() {
   $('elapsed').textContent=timestamp(time);
   $('seek').value=duration?Math.round(time/duration*1000):0;
   $('seek').setAttribute('aria-valuetext',timestamp(time)+' / '+timestamp(duration));
-  drawWave($('waveform'),wavePeaks[player.mode],duration?time/duration:0,player.mode);
+  drawWave($('waveform'),player.audition?wavePeaks.original:wavePeaks[player.mode],duration?time/duration:0,player.mode);
 }
 function animate() {
   frame=0;
@@ -223,48 +239,56 @@ function playingStem() {
 }
 function refreshComparison() {
   const available=!!player.original && !loading;
-  const effects=effectNames(), rendered=ready();
+  const effects=trial ? [trial.label+' 미리듣기'] : effectNames();
+  const rendered=trial ? !!trial.result : ready() || !!player.audition;
   const noDifference=rendered && effects.length>0 && !player.canCompare;
   for(const button of all('[data-mode]')) {
     const mode=button.dataset.mode;
     button.setAttribute('aria-pressed',String(player.mode===mode));
-    button.disabled=!available || (mode==='processed' && noDifference);
+    button.disabled=!available || (mode==='processed' && (!effects.length || noDifference || (trial && !rendered)));
   }
   let note;
   if(!available) note=loading?'음원을 준비하고 있습니다.':'음원을 불러오면 원본과 보정을 비교할 수 있습니다.';
-  else if(!effects.length) {
-    const firstEffect=repairNames[track.analysis?.kind] || '선명도 EQ '+comparisonClarity+'%';
-    note='B를 누르면 '+firstEffect+' 효과를 켭니다. A로 원본을 다시 들을 수 있습니다.';
-  } else if(renderFailed) note='보정본을 만들지 못했습니다. B를 눌러 다시 시도하세요.';
+  else if(!effects.length) note='현재 A 원본입니다. 아래 효과를 누르면 B에서 바로 들을 수 있습니다.';
+  else if(trial && !rendered) note='미리듣기를 준비하고 있습니다.';
+  else if(!trial && renderFailed) note='보정본을 만들지 못했습니다. B를 눌러 다시 시도하세요.';
   else if(!rendered) note=preferred==='processed'?'지금은 A 원본입니다. 보정이 끝나면 B로 전환합니다.':'보정본을 준비하고 있습니다. 현재 선택은 A 원본입니다.';
   else if(noDifference) note='현재 설정과 원본의 차이가 거의 없습니다. 필터나 강도를 바꿔 비교하세요.';
-  else if(!player.signalChanged) note='출력 피크를 맞추면서 음량만 달라졌습니다. '+(player.levelsMeasured?'음량 맞춤을 켜서 확인할 수 있습니다.':'이 음원은 파일의 재생 음량으로 비교합니다.');
+  else if(!player.signalChanged && !player.audition) note='출력 피크를 맞추면서 음량만 달라졌습니다. '+(player.levelsMeasured?'음량 맞춤을 켜서 확인할 수 있습니다.':'이 음원은 파일의 재생 음량으로 비교합니다.');
   else note=(player.mode==='processed'?'B 보정 · ':'A 원본 · B 설정 · ')+effects.join(' + ');
   if(available && playingStem()) note='스템 재생 중 · A/B를 누르면 같은 위치에서 전체 믹스를 듣습니다.'+(effects.length?'':' '+note);
   if($('compare-note').textContent!==note) $('compare-note').textContent=note;
 }
 function refreshTransport() {
   drawDiagnosis();
-  const waiting=!!auditionFor && !player.playing;
+  const available=!!track && !loading;
+  const toneDraft = trial?.source==='tone' ? trial : null;
+  drawTone(toneDraft?.settings || recipe(), available, (track?.vocalChannels ?? track?.channels)>1, toneDraft, rangeLabel(selectedRange));
+  const regionChanged=keyOf(appliedRange)!==keyOf(selectedRange);
+  $('region-apply').hidden=!available || !!trial || !hasProcessing() || !regionChanged;
+  $('region-apply').textContent=rangeLabel(selectedRange)+'에 현재 설정 적용';
+  for(const button of all('[data-trial]')) button.disabled=!available;
+  $('trial-actions').hidden=!trial || !!toneDraft;
+  $('trial-apply').disabled=!trial?.result;
+  if(trial) {
+    $('trial-status').textContent=rangeLabel(trial.settings.region)+' · '+trial.label+(trial.result?' · A/B로 비교하세요.':' · 미리듣기 준비 중…');
+    $('trial-apply').textContent=selectedRange?'이 구간에만 적용':'전체 곡에 적용';
+  }
+  const waiting=!!trial && !trial.result && !player.playing;
   const playLabel=waiting?'미리듣기 취소':player.playing?'일시정지':player.pendingStart?'재생 취소':'재생';
   $('play').disabled=loading || !player.original;
   $('play').setAttribute('aria-label',playLabel);
   $('play').title=playLabel+' · Space';
   iconIn($('play'),waiting || player.pendingStart?'close':player.playing?'pause':'play');
   $('loop').setAttribute('aria-pressed',String(!!player.region || player.loop));
-  $('loop').setAttribute('aria-label',player.region?'복원 구간 반복 해제':'전체 반복 재생');
-  const marker=$('repair-range');
-  marker.hidden=!player.region;
-  if(player.region) {
-    marker.style.left=(100*player.region.start/player.duration)+'%';
-    marker.style.width=(100*(player.region.end-player.region.start)/player.duration)+'%';
-  }
+  $('loop').setAttribute('aria-label',player.region?'구간 반복 해제':selectedRange?'선택 구간 반복':'전체 반복 재생');
+  selection.mark(selectedRange || player.region);
   const match=$('match');
-  const unmeasurable=!!track && !loading && (!Number.isFinite(player.originalLevel) || (ready() && !!player.processed && !player.levelsMeasured));
+  const unmeasurable=!!player.audition || (!!track && !loading && (!Number.isFinite(player.originalLevel) || (ready() && !!player.processed && !player.levelsMeasured)));
   match.disabled=loading || !track || unmeasurable;
   match.setAttribute('aria-pressed',String(!match.disabled && player.levelMatch));
-  match.lastElementChild.textContent=unmeasurable?'음량 측정 불가':'음량 맞춤';
-  match.title=unmeasurable?'통합 음량을 측정할 수 없어 파일의 재생 음량으로 비교합니다.':'A/B 재생 음량 맞추기';
+  match.lastElementChild.textContent=player.audition?'동일 게인':unmeasurable?'음량 측정 불가':'음량 맞춤';
+  match.title=player.audition?'실시간 효과는 원본과 같은 재생 게인으로 비교합니다.':unmeasurable?'통합 음량을 측정할 수 없어 파일의 재생 음량으로 비교합니다.':'A/B 재생 음량 맞추기';
   $('mute').setAttribute('aria-pressed',String(player.muted));
   $('mute').setAttribute('aria-label',player.muted?'음소거 해제':'음소거');
   iconIn($('mute'),player.muted || !player.volume?'muted':'volume');
@@ -272,14 +296,15 @@ function refreshTransport() {
   $('seek').disabled=loading || !player.original;
   $('total').textContent=timestamp(track?.duration || 0);
   refreshComparison();
-  $('export').disabled=!ready();
-  $('export').lastElementChild.textContent=!loading && track && hasProcessing()?'보정본 WAV 저장':'WAV 저장';
+  $('export').disabled=!!trial || !ready();
+  $('export').lastElementChild.textContent=track?.stemPair?'합본 WAV 저장':!loading && track && hasProcessing()?'보정본 WAV 저장':'WAV 저장';
+  pairedStems.refresh();
   const enabledLab=labFilters.filter(f=>state[f.key].enabled);
   for(const f of labFilters) {
     const button=nodes[f.key].listen;
-    const selected=enabledLab.length===1 && enabledLab[0]===f;
-    const playing=selected && ready() && player.playing && player.mode==='processed';
-    const pending=auditionFor?.source===f.key;
+    const selected=trial ? trial.source===f.key && trial.result : enabledLab.length===1 && enabledLab[0]===f && ready();
+    const playing=selected && player.playing && player.mode==='processed';
+    const pending=trial?.source===f.key && !trial.result;
     button.disabled=loading || !track;
     button.setAttribute('aria-pressed',String(playing));
     button.setAttribute('aria-label',f.name+(pending?' 미리듣기 취소':playing?' 일시정지':' 듣기'));
@@ -291,6 +316,9 @@ function refreshTransport() {
   animate();
 }
 function releaseTrack() {
+  discardTrial(false);
+  appliedRange=selectedRange=null;
+  selection.reset(false,null);
   if(activeRender) activeRender.controller.abort();
   activeRender=null;
   if(stemRequest) stemRequest.abort();
@@ -298,7 +326,7 @@ function releaseTrack() {
   clearTimeout(renderTimer);
   player.clear();
   track=null; master=null; renderedKey=''; renderFailed=false;
-  repairEnabled=false;auditionFor=null;preferred='original';
+  repairEnabled=false;preferred='original';
   setRecipe({});wavePeaks={};
   cache.clear();
   for(const part of ['vocals','instrumental']) {
@@ -321,8 +349,8 @@ function showStems(links) {
     $(part+'-audio').src=links[part];
     const a=$(part+'-save'); a.href=links[part]; a.download=track.name+'-'+part+'.wav'; a.hidden=false;
   }
-  $('split').lastChild.textContent='분리 완료';
-  $('stem-status').textContent='보컬과 반주를 각각 들어보거나 WAV로 저장하세요.';
+  $('split').lastChild.textContent=track.stemPair?'두 스템 불러옴':'분리 완료';
+  $('stem-status').textContent=track.stemPair?'불러온 보컬과 반주 원본입니다. 복원 스튜디오에서 보컬을 보정하고 합본을 들을 수 있습니다.':'보컬과 반주를 각각 들어보거나 WAV로 저장하세요.';
 }
 function replaceTrack(info,buffer,settings) {
   releaseTrack();
@@ -331,7 +359,7 @@ function replaceTrack(info,buffer,settings) {
   player.original=buffer; player.originalLevel=info.metrics.lufs;
   $('track-title').textContent=info.name;
   $('track-title').title=info.name;
-  $('source-tag').textContent=info.example?'예제 트랙':'내 음원';
+  $('source-tag').textContent=info.stemPair?'보컬 보정 · 반주와 함께 재생':info.example?'예제 트랙':'내 음원';
   const rate=Number((info.rate/1000).toFixed(2))+' kHz';
   $('track-spec').textContent=[info.format,rate,info.channels===2?'STEREO':'MONO'].join('  /  ');
   $('ruler').replaceChildren(...Array.from({length:5},(_,i)=>{
@@ -339,21 +367,120 @@ function replaceTrack(info,buffer,settings) {
   }));
   if(info.hasStems) showStems({vocals:base(info.id)+'/stems/vocals',instrumental:base(info.id)+'/stems/instrumental'});
   setRecipe(settings || {});
+  appliedRange=selectedRange=settings?.region || null;
+  selection.reset(true,selectedRange);
+  if(selectedRange) player.setRegion(selectedRange);
   repairEnabled=!!(settings || info.recommended)?.repair && repairKinds.includes(info.analysis?.kind);
   preferred=hasProcessing()?'processed':'original';
 }
-function startAudition(key) {
-  if(auditionFor?.id!==track?.id || auditionFor?.key!==key) return;
-  const region=auditionFor.region;
-  auditionFor=null;
-  if(region) player.setRegion(region);
-  if(!player.playing && !player.pendingStart) togglePlay();
-  else if(!region) refreshTransport();
+function selectRange(range) {
+  if(!track || loading) return;
+  discardTrial();
+  selectedRange=range;
+  selection.reset(true,range);
+  player.setRegion(range);
+  message('');
 }
-function cancelAudition() {
-  auditionFor=null;
-  preferred=player.mode;
+function discardTrial(restore=true) {
+  if(!trial) return;
+  const live=trial.live;
+  trial.controller.abort();
+  trial=null;
+  if(live) player.setAudition(null);
+  if(restore && track) {
+    preferred='original';
+    if(ready()) publish(renderedKey,master);
+    else player.setRendered(null,null,'original');
+  }
+}
+async function previewTone(patch) {
+  if(!track || loading) return;
+  const settings={...(trial?.source==='tone' ? trial.settings : recipe()),...patch};
+  if(!settings.bits) delete settings.bits;
+  if(!settings.bits || !settings.dither) delete settings.dither;
+  if(!settings.fullness) delete settings.fullness;
+  if(selectedRange && hasProcessing(settings)) settings.region=selectedRange; else delete settings.region;
+  const label=effectNames(settings).join(' + ') || '효과 끄기';
+  // Paired stems and regional edits need the renderer's vocal-only chain and
+  // boundary blend. Other rack effects can also precede these tone controls.
+  if(track.stemPair || settings.region || settings.repair || filters.some(f=>f.key!=='width' && settings[f.key])) {
+    return previewSettings(settings,label,'tone',selectedRange);
+  }
+  if(trial?.live) trial.controller.abort(); else discardTrial(false);
+  const pending={controller:new AbortController(),source:'tone',settings,label,live:true};
+  trial=pending;
+  preferred='processed';
   refreshTransport();
+  try {
+    await player.context().resume();
+    if(trial!==pending) return;
+    if(hasProcessing(settings)) {
+      await player.setAudition(settings);
+    } else {
+      player.setRendered(null,null,'original');
+    }
+    if(trial!==pending) return;
+    pending.result=true;
+    refreshTransport();
+    if(!player.playing && !player.pendingStart) togglePlay();
+  } catch {
+    // An unsupported audio worklet can still audition the exact rendered mix.
+    if(trial===pending) await previewSettings(settings,label,'tone',selectedRange);
+  }
+}
+async function previewEffect(filterKey) {
+  if(!track || loading) return;
+  const filter=filters.find(f=>f.key===filterKey);
+  const amount=state[filterKey].value;
+  const settings={...recipe(),[filterKey]:amount};
+  if(labFilters.includes(filter)) {
+    for(const other of labFilters) if(other!==filter) settings[other.key]=0;
+  }
+  await previewSettings(settings,filter.name+' '+amount+'%',filterKey,selectedRange);
+}
+async function previewSettings(settings,label,source,loop) {
+  if(selectedRange) settings.region=selectedRange; else delete settings.region;
+  discardTrial(false);
+  preferred='processed';
+  const pending={controller:new AbortController(),settings,label,source};
+  trial=pending;
+  player.context().resume().catch(()=>{});
+  player.setRendered(null,null,'original');
+  message('');
+  try {
+    if(source==='tone') {
+      // Coalesce slider movement before launching an expensive full-track render.
+      await new Promise(resolve=>setTimeout(resolve,180));
+      if(trial!==pending) return;
+    }
+    const response=await request(base(track.id)+'/render?preview=true',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:keyOf(settings),signal:pending.controller.signal
+    });
+    const stats=JSON.parse(response.headers.get('X-Audio-Metrics'));
+    const buffer=await player.decode(await response.blob());
+    if(trial!==pending) return;
+    const different=hasSignalChange(player.original,buffer,stats.ceilingGain);
+    pending.result=true;
+    wavePeaks.processed=envelope(buffer);
+    if((player.region?.start!==loop?.start) || (player.region?.end!==loop?.end)) player.setRegion(loop);
+    player.setRendered(buffer,stats.lufs,preferred,stats.ceilingGain,different,stats.regionLevels);
+    if(!player.playing && !player.pendingStart) togglePlay();
+  } catch(err) {
+    if(trial!==pending) return;
+    discardTrial();
+    message('미리듣기를 준비하지 못했습니다. '+err.message);
+  }
+}
+function adoptTrial() {
+  if(!trial?.result) return;
+  const {settings}=trial;
+  const keepAudition=!!(trial.live && player.audition);
+  if(keepAudition) trial=null;
+  else discardTrial(false);
+  setRecipe(settings);
+  repairEnabled=settings.repair;
+  changed({immediate:true,keepAudition});
 }
 async function loadTrack(url,options={},name='예제 음원',version=null,historyId=null) {
   const serial=++loadSerial;
@@ -363,8 +490,9 @@ async function loadTrack(url,options={},name='예제 음원',version=null,histor
   requestedTrackName=name;
   requestedTrackId=historyId;
   requestedVersion=version;
+  discardTrial();
   loading=true;
-  auditionFor=null;
+  selection.reset(false,null);
   if(player.playing || player.pendingStart) player.pause();
   drawFilters(); refreshTransport();
   renderStatus('음원을 준비하는 중…','음원 준비 중'); message('');
@@ -394,6 +522,7 @@ async function loadTrack(url,options={},name='예제 음원',version=null,histor
     requestedTrackId=null;requestedVersion=null;
     loading=false;
     const reason=err.message || '음원을 불러오지 못했습니다.';
+    selection.reset(!!track,selectedRange);
     message(reason+(track?' 현재 음원은 ‘'+track.name+'’입니다.':''));
     if(ready()) showMaster();
     else renderStatus('음원을 다시 불러오세요');
@@ -405,10 +534,10 @@ async function loadTrack(url,options={},name='예제 음원',version=null,histor
 function publish(key,result) {
   renderFailed=false;
   renderedKey=key; master=result;
-  wavePeaks.processed=result.wave;
   showMaster();
-  player.setRendered(result.buffer,result.stats.lufs,preferred,result.stats.ceilingGain,result.signalChanged);
-  startAudition(key);
+  if(trial) {refreshTransport();return}
+  wavePeaks.processed=result.wave;
+  player.setRendered(result.buffer,result.stats.lufs,preferred,result.stats.ceilingGain,result.signalChanged,result.stats.regionLevels);
   libraryUI.refresh();
 }
 function remember(key,blob,buffer,stats) {
@@ -430,18 +559,20 @@ function queueRender(immediate=false) {
   const usesModel=state.restore.enabled || (repairEnabled && track.analysis?.kind==='band');
   if(usesModel) renderStatus('Apollo 복원을 적용하는 중…','AI 복원 중');
   else renderStatus('필터를 적용하는 중…','필터 적용 중');
-  if(player.mode!=='original') player.setMode('original');
+  if(player.mode!=='original' && !player.audition) player.setMode('original');
   else refreshTransport();
   if(activeRender && (activeRender.recipe.restore || (activeRender.recipe.repair && track.analysis?.kind==='band')) && !usesModel) {
     activeRender.controller.abort(); activeRender=null;
   }
   renderTimer=setTimeout(renderLatest,immediate?0:160);
 }
-function changed({source=null,region=null,immediate=false}={}) {
-  auditionFor=source?{id:track.id,key:keyOf(recipe()),source,region}:null;
+function changed({immediate=false,keepAudition=false}={}) {
+  discardTrial(false);
+  if(!keepAudition && player.audition) player.setAudition(null);
+  appliedRange=selectedRange;
   preferred=hasProcessing()?'processed':'original';
   drawFilters();
-  queueRender(immediate || !!source);
+  queueRender(immediate);
 }
 async function renderLatest() {
   if(!track || loading || activeRender) return;
@@ -464,7 +595,6 @@ async function renderLatest() {
   } catch(err) {
     if(err.name!=='AbortError' && !loading && track?.id===id && key===keyOf(recipe())) {
       renderFailed=true;
-      auditionFor=null;
       renderStatus(hasProcessing(selected)?'적용 실패 · B로 다시 시도하세요.':'WAV 준비 실패 · 음원을 다시 불러오세요.');
       message(err.message); refreshTransport();
     }
@@ -483,7 +613,7 @@ function selectFile(file) {
   loadTrack('/api/studio/tracks',{method:'POST',body:data},file.name);
 }
 async function saveMaster() {
-  if(!ready()) return;
+  if(trial || !ready()) return;
   const id=track.id, settings=recipe();
   const url=URL.createObjectURL(master.blob);
   const a=document.createElement('a');
@@ -522,28 +652,28 @@ function page() {
   if(location.hash==='#history') libraryUI.open();
   const view=location.hash==='#stems'?'stems':location.hash==='#lab'?'lab':'studio';
   const stems=view==='stems', lab=view==='lab';
-  if((stems || lab) && player.region) player.setRegion(null);
-  if(stems || lab) auditionFor=null;
+  if(stems || lab) discardTrial();
+  if((stems || lab) && player.region && !selectedRange) player.setRegion(null);
   $('studio-view').hidden=stems; $('stems-view').hidden=!stems;
   $('restoration-rack').hidden=lab; $('lab-view').hidden=!lab;
-  const title=stems?'스템 분리':lab?'사운드 랩':'복원 스튜디오';
+  const title=stems?'스템 작업':lab?'사운드 랩':'복원 스튜디오';
   $('page-title').textContent=$('crumb-current').textContent=title;
   document.title=title+' · AIsoundFix';
-  $('page-intro').textContent=stems?'한 트랙에서 보컬과 반주를 각각 꺼내 들어보세요.':lab?'효과를 하나씩 들어보세요. 스위치를 켜면 여러 효과를 섞을 수 있습니다.':'음원을 불러와 복원할 부분을 확인하고 원본과 비교하세요.';
+  $('page-intro').textContent=stems?'보컬·반주 WAV를 함께 열거나 현재 곡에서 스템을 분리하세요.':lab?'효과를 하나씩 들어보세요. 스위치를 켜면 여러 효과를 섞을 수 있습니다.':'음원을 불러와 복원할 부분을 확인하고 원본과 비교하세요.';
   for(const a of all('[data-view]')) {
     const active=a.dataset.view===view;
     a.classList.toggle('active',active);
     if(active) a.setAttribute('aria-current','page'); else a.removeAttribute('aria-current');
     a.setAttribute('aria-label',a.textContent.trim());
   }
-  if(stems && player.original){auditionFor=null;preferred='original';player.setMode('original')}
+  if(stems && player.original){preferred='original';player.setMode('original')}
   if(!stems) for(const part of ['vocals','instrumental']) $(part+'-audio').pause();
   drawFilters(); refreshTransport();
   if(location.hash==='#rack-title') $('rack-title').focus();
 }
 async function togglePlay() {
-  if(auditionFor) {
-    cancelAudition();
+  if(trial && !trial.result) {
+    discardTrial();
     if(!player.playing && !player.pendingStart) return;
   }
   for(const part of ['vocals','instrumental']) $(part+'-audio').pause();
@@ -551,7 +681,6 @@ async function togglePlay() {
 }
 function chooseMode(mode) {
   if(loading || !player.original || document.querySelector('[data-mode="'+mode+'"]').disabled) return;
-  auditionFor=null;
   const stem=playingStem();
   if(stem) {
     const position=stem.currentTime;
@@ -560,46 +689,36 @@ function chooseMode(mode) {
     togglePlay();
   }
   preferred=mode;
-  if(mode==='processed' && !hasProcessing()) {
-    if(repairKinds.includes(track.analysis?.kind)) enableRepair(true);
-    else {
-      state.clarity.enabled=true;
-      state.clarity.value=comparisonClarity;
-    }
-    changed({immediate:true});
-    return;
-  }
-  if(mode==='processed' && !ready()) {
+  if(mode==='processed' && !trial && !ready() && (renderFailed || !player.audition)) {
     if(renderFailed) queueRender(true);
     else refreshTransport();
     return;
   }
   player.setMode(mode);
 }
-function audition(key) {
-  if(!track || loading) return;
-  player.context().resume().catch(()=>{});
-  setRecipe({[key]:state[key].value},labFilters);
-  changed({source:key});
-}
 function enableRepair(enabled) {
   repairEnabled=enabled;
   if(enabled && track.analysis?.kind==='band') state.restore.enabled=false;
-  if(!enabled && player.region) player.setRegion(null);
+  if(!enabled && player.region && !selectedRange) player.setRegion(null);
 }
 function listenToRepair() {
   if(!track || loading) return;
-  if(auditionFor?.source==='repair') {cancelAudition();return}
-  if(player.region) {player.setRegion(null); if(!player.playing) togglePlay(); return}
+  if(trial?.source==='repair' && !trial.result) {discardTrial();return}
+  if(player.region && !selectedRange) {player.setRegion(null); if(!player.playing) togglePlay(); return}
   const eligible=repairKinds.includes(track.analysis?.kind);
   if(!eligible && !filters.some(f=>state[f.key].enabled)) return;
-  player.context().resume().catch(()=>{});
-  if(eligible) enableRepair(true);
-  changed({source:'repair',region:track.analysis?.preview});
+  const settings=recipe();
+  if(eligible) {
+    settings.repair=true;
+    if(track.analysis.kind==='band') settings.restore=0;
+  }
+  previewSettings(settings,repairNames[track.analysis?.kind] || '현재 필터','repair',selectedRange || track.analysis?.preview);
 }
 
 function historyRemoved(ids,settings) {
-  const matches=other=>!!other && Object.keys(settings).every(key=>settings[key]===other[key]);
+  const matches=other=>!!other && keyOf(settings.region || null)===keyOf(other.region || null)
+    && ['bits','dither','fullness'].every(key=>(settings[key] || 0)===(other[key] || 0))
+    && Object.keys(settings).every(key=>key==='region' || settings[key]===other[key]);
   const pending=loading && ids.includes(requestedTrackId) && (!settings || matches(requestedVersion?.recipe));
   if(pending) {
     loadSerial++;loadRequest?.abort();loading=false;requestedTrackId=null;requestedVersion=null;requestedTrackName='';
@@ -615,7 +734,8 @@ function historyRemoved(ids,settings) {
     if(renderedKey && matches(JSON.parse(renderedKey))) {master=null;renderedKey=''}
     if(!matches(recipe())) return;
     clearTimeout(renderTimer);activeRender?.controller.abort();activeRender=null;
-    auditionFor=null;player.pause();player.setRegion(null);
+    player.pause();player.setRegion(null);
+    discardTrial(false); appliedRange=selectedRange=null;selection.reset(true,null);
     setRecipe({});repairEnabled=false;preferred='original';master=null;renderedKey='';
     player.setRendered(null,null,'original');drawFilters();queueRender(true);
   } else {
@@ -627,8 +747,9 @@ function historyRemoved(ids,settings) {
 const libraryUI=setupHistory({
   request,removed:historyRemoved,
   describeRecipe(settings) {
-    const names=filters.filter(f=>settings[f.key]>0).map(f=>f.name+' '+settings[f.key]+'%');
+    const names=effectNames({...settings,repair:false});
     if(settings.repair) names.unshift('진단 복원');
+    if(settings.region) names.unshift(rangeLabel(settings.region));
     return names.join(' + ') || '필터 미적용';
   },
   async openTrack(row,version) {
@@ -637,18 +758,24 @@ const libraryUI=setupHistory({
     return opened;
   }
 });
+const pairedStems=setupStemPair({loadTrack,request,message,getTrack:()=>track,recipe});
+const drawTone=setupToneControls({adjust:previewTone,apply:adoptTrial,cancel:()=>discardTrial()});
 buildFilters(); paintIcons(); page();
 document.querySelector('.skip').onclick=e=>{e.preventDefault();$('main').focus()};
 $('upload').onclick=()=>$('file-input').click();
 $('file-input').onchange=e=>{selectFile(e.target.files[0]);e.target.value=''};
 $('play').onclick=togglePlay;
-$('loop').onclick=()=>player.changeLoop();
-$('seek').oninput=e=>{auditionFor=null; player.seek(player.duration*Number(e.target.value)/1000)};
+$('loop').onclick=()=>{if(selectedRange && !player.region) player.setRegion(selectedRange); else player.changeLoop()};
+$('seek').oninput=e=>player.seek(player.duration*Number(e.target.value)/1000);
 $('match').onclick=()=>{player.levelMatch=!player.levelMatch;player.setMode(player.mode)};
 $('mute').onclick=()=>{player.muted=!player.muted;player.updateVolume();refreshTransport()};
 $('volume').oninput=e=>{player.volume=Number(e.target.value)/100;player.muted=false;player.updateVolume();refreshTransport()};
 for(const b of all('[data-mode]')) b.onclick=()=>chooseMode(b.dataset.mode);
 $('recommend').onclick=listenToRepair;
+for(const button of all('[data-trial]')) button.onclick=()=>previewEffect(button.dataset.trial);
+$('trial-apply').onclick=adoptTrial;
+$('trial-cancel').onclick=()=>discardTrial();
+$('region-apply').onclick=()=>changed({immediate:true});
 $('repair-toggle').onchange=e=>{enableRepair(e.target.checked);changed()};
 $('reset').onclick=()=>{enableRepair(false);setRecipe({},restorationFilters);changed()};
 $('lab-reset').onclick=()=>{setRecipe({},labFilters);changed()};
@@ -657,7 +784,7 @@ $('split').onclick=splitTrack;
 $('notice').querySelector('button').onclick=()=>message('');
 for(const part of ['vocals','instrumental']) {
   $(part+'-audio').onplay=()=>{
-    if(auditionFor) {auditionFor=null;preferred=player.mode}
+    if(trial) discardTrial();
     if(player.playing || player.pendingStart) player.pause();
     $(part==='vocals'?'instrumental-audio':'vocals-audio').pause();
     refreshTransport();
@@ -679,14 +806,17 @@ document.addEventListener('keydown',e=>{
   if(e.code==='KeyB') chooseMode('processed');
 });
 let dragDepth=0;
-window.addEventListener('dragenter',e=>{if(Array.from(e.dataTransfer.types).includes('Files')){dragDepth++;$('drop-overlay').hidden=false;e.preventDefault()}});
+window.addEventListener('dragenter',e=>{if(Array.from(e.dataTransfer.types).includes('Files')){dragDepth++;$('drop-overlay').hidden=$('stem-pair-form').contains(e.target);e.preventDefault()}});
 window.addEventListener('dragover',e=>{if(Array.from(e.dataTransfer.types).includes('Files'))e.preventDefault()});
 window.addEventListener('dragleave',()=>{dragDepth=Math.max(0,dragDepth-1);if(!dragDepth)$('drop-overlay').hidden=true});
-window.addEventListener('drop',e=>{e.preventDefault();dragDepth=0;$('drop-overlay').hidden=true;selectFile(e.dataTransfer.files[0])});
+window.addEventListener('drop',e=>{
+  e.preventDefault();dragDepth=0;$('drop-overlay').hidden=true;
+  if(!pairedStems.acceptDrop(e.target,e.dataTransfer.files)) selectFile(e.dataTransfer.files[0]);
+});
 const resize=new ResizeObserver(()=>{drawTimeline();drawFilters()});
 resize.observe($('waveform')); resize.observe($('filters')); resize.observe($('lab-filters'));
 request('/api/studio/health').then(()=>engine(true)).catch(()=>engine(false));
 const requestedExample=new URLSearchParams(location.search).get('example');
-const exampleKey=['midnight','compressed'].includes(requestedExample)?requestedExample:'clipped';
+const exampleKey=['midnight','compressed','clipped'].includes(requestedExample)?requestedExample:'library';
 if(location.hash==='#history') showEmptyTrack();
 else loadTrack('/api/studio/examples/'+exampleKey);

@@ -40,10 +40,13 @@ export class StudioPlayer {
 
   clear() {
     if (this.group) this.retire();
+    this.auditionRequest = (this.auditionRequest || 0) + 1;
+    this.audition = null;
     this.original=null;
     this.processed=null;
     this.originalLevel=null;
     this.processedLevel=null;
+    this.regionLevels=null;
     this.ceilingGain=1;
     this.signalChanged=false;
     this.region=null;
@@ -55,11 +58,22 @@ export class StudioPlayer {
 
   get duration() {return this.original?.duration || 0}
 
-  get levelsMeasured() {
-    return Number.isFinite(this.originalLevel) && Number.isFinite(this.processedLevel);
+  get monitorLevels() {
+    if (this.audition) return [this.originalLevel, null];
+    const levels=this.regionLevels;
+    // Decoding at the device's rate can round a track endpoint by one sample.
+    if(this.region && levels && Math.abs(this.region.start-levels.start)<.0001 &&
+       Math.abs(this.region.end-levels.end)<.0001 &&
+       Number.isFinite(levels.originalLufs) && Number.isFinite(levels.processedLufs)) {
+      return [levels.originalLufs,levels.processedLufs];
+    }
+    return [this.originalLevel,this.processedLevel];
   }
 
+  get levelsMeasured() {return this.monitorLevels.every(Number.isFinite)}
+
   get canCompare() {
+    if (this.audition) return true;
     const matched=this.levelMatch && this.levelsMeasured;
     return !!this.processed && (this.signalChanged || (!matched && this.ceilingGain<.999));
   }
@@ -87,7 +101,16 @@ export class StudioPlayer {
       source.onended=null;
       try {source.stop(now+.016)} catch {}
     }
-    setTimeout(()=>group.bus.disconnect(),90);
+    setTimeout(()=>this.disconnect(group),90);
+  }
+
+  disconnect(group) {
+    if (group.processor) {
+      group.processor.port.postMessage(null);
+      group.processor.port.close();
+      group.processor.disconnect();
+    }
+    group.bus.disconnect();
   }
 
   startAt(position) {
@@ -103,16 +126,29 @@ export class StudioPlayer {
     bus.connect(this.output);
     const group={bus,sources:[],gains:[]};
     this.group=group;
-    const attach=buffer=>{
+    const attach=(buffer, audition=null)=>{
       const src=ctx.createBufferSource(), gain=ctx.createGain();
       src.buffer=buffer; src.loop=!!this.region || this.loop;
       if(this.region) {src.loopStart=this.region.start; src.loopEnd=this.region.end}
-      src.connect(gain).connect(bus);
+      if (audition) {
+        const processor = new AudioWorkletNode(ctx, 'studio-audition', {
+          outputChannelCount: [buffer.numberOfChannels],
+          channelCount: buffer.numberOfChannels,
+          channelCountMode: 'explicit',
+          processorOptions: audition.settings
+        });
+        group.processor = processor;
+        src.connect(processor).connect(gain);
+      } else {
+        src.connect(gain);
+      }
+      gain.connect(bus);
       group.gains.push(gain.gain);
       group.sources.push(src);
     };
     attach(this.original);
-    if(this.processed) attach(this.processed);
+    if(this.audition) attach(this.audition.base, this.audition);
+    else if(this.processed) attach(this.processed);
     this.updateMix(true);
     for(const source of group.sources) {
       source.start(now,Math.min(this.offset,Math.max(0,source.buffer.duration-.0001)));
@@ -121,7 +157,7 @@ export class StudioPlayer {
     group.sources[0].onended=()=>{
       if (this.group!==group || this.loop || this.region) return;
       this.playing=false; this.offset=this.duration; this.group=null;
-      group.bus.disconnect(); this.onChange();
+      this.disconnect(group); this.onChange();
     };
   }
 
@@ -153,8 +189,8 @@ export class StudioPlayer {
 
   updateMix(immediate=false) {
     if(!this.group) return;
-    const a=this.originalLevel, b=this.processedLevel;
-    const matched=this.processed && this.levelMatch && this.levelsMeasured;
+    const [a,b]=this.monitorLevels;
+    const matched=this.processed && this.levelMatch && Number.isFinite(a) && Number.isFinite(b);
     let original=0, processed=0;
     if(this.mode==='processed') {
       processed=matched ? 10**((Math.min(a,b)-b)/20) : 1;
@@ -176,10 +212,35 @@ export class StudioPlayer {
     this.onChange();
   }
 
-  setRendered(buffer,level,mode,ceilingGain=1,signalChanged=false) {
-    const replaceSources=this.playing && buffer!==this.processed;
+  async setAudition(settings, base=this.original) {
+    const request = ++this.auditionRequest;
+    if (!settings || !base) {
+      if (this.audition) {
+        this.audition = null;
+        this.setMode(this.mode, this.playing);
+      }
+      return;
+    }
+    const ctx = this.context();
+    if (!this.auditionModule) {
+      this.auditionModule = ctx.audioWorklet.addModule(new URL('./studio-audition.js', import.meta.url))
+        .catch(error => { this.auditionModule = null; throw error; });
+    }
+    await this.auditionModule;
+    if (request !== this.auditionRequest) return;
+    const replace = this.audition?.base !== base;
+    this.audition = {base, settings};
+    if (!replace) this.group?.processor?.port.postMessage(settings);
+    this.setMode('processed', replace && this.playing);
+  }
+
+  setRendered(buffer,level,mode,ceilingGain=1,signalChanged=false,regionLevels=null) {
+    this.auditionRequest++;
+    const replaceSources=this.playing && (buffer!==this.processed || !!this.audition);
+    this.audition=null;
     this.processed=buffer;
     this.processedLevel=level;
+    this.regionLevels=regionLevels;
     this.ceilingGain=ceilingGain;
     this.signalChanged=signalChanged;
     this.setMode(mode,replaceSources);
